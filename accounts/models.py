@@ -5,11 +5,6 @@ from django.conf import settings
 
 # Create your models here.    
 
-class Role(models.TextChoices):
-    CLIENT = 'CLIENT', 'Client'
-    COORDINATOR = 'COORDINATOR', 'Coordinator'
-    PERSONNEL = 'PERSONNEL', 'Personnel'
-
 
 
 class UserManager(BaseUserManager):
@@ -37,6 +32,12 @@ class UserManager(BaseUserManager):
     
 
 class User(AbstractUser):
+    
+    class Role(models.TextChoices):
+        CLIENT = 'CLIENT', 'Client'
+        COORDINATOR = 'COORDINATOR', 'Coordinator'
+        PERSONNEL = 'PERSONNEL', 'Personnel'
+
     username = None
     email = models.EmailField(unique=True)
     USERNAME_FIELD = 'email'

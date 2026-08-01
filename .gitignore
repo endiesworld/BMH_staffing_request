@@ -1,27 +1,27 @@
 # Python
-  __pycache__/
-  *.py[cod]
-  .pytest_cache/
-  .ruff_cache/
-  .coverage
-  htmlcov/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-  # Virtual environment
-  .venv/
+# Virtual environment
+.venv/
 
-  # Django local state
-  db.sqlite3
-  staticfiles/
-  media/
+# Django local state
+db.sqlite3
+staticfiles/
+media/
 
-  # Secrets and local configuration
-  .env
-  .env.*
-  !.env.example
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
 
-  # Editors and operating systems
-  .idea/
-  .vscode/
-  .DS_Store
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
 
 *.sqlite3
