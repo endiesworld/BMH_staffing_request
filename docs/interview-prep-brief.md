@@ -219,6 +219,27 @@ SUBMITTED
   a **separate Celery worker Deployment** (same image, different command) on K8s.
 - **Lives in:** the `servicing` app — recommendation as a service module, notification as a Celery task.
 
+### ADR-009 — User provisioning & per-role profiles (refines ADR-006)
+- **Context:** Deciding which profiles exist, how they're created, and how accounts are provisioned.
+- **Decisions:**
+  1. **Profile models:** `ClientProfile`, `PersonnelProfile`, **and `CoordinatorProfile`** — all three
+     roles carry role-specific stored attributes. *(Revised: a coordinator manages a `department` and
+     `region`, so it does carry data. A profile is justified by stored **attributes**, not behavior.)*
+  2. **Provisioning channels:** Clients & Personnel **self-register** via a form that collects their
+     profile data; **Coordinators are admin-provisioned** (internal staff; role set in admin) with no
+     self-registration — the admin flow creates their `CoordinatorProfile` (department, region).
+  3. **Creation mechanism (D2): explicit service-layer creation** — a function creates the `User` +
+     matching profile **atomically** (`transaction.atomic()`). Chosen over `post_save` signals for
+     traceability/testability. **Known cost:** must be invoked everywhere app users are created;
+     `createsuperuser` and admin-created coordinators are separate provisioning paths that bypass it.
+  4. **Scope (D3): scaffold minimal fields now, grow later.** `PersonnelProfile` eligibility fields are
+     deferred; any field added later must be `null`/`blank` or defaulted to keep migrations clean.
+- **Invariant:** every user has exactly one matching profile — Client → ClientProfile,
+  Personnel → PersonnelProfile, Coordinator → CoordinatorProfile.
+- **Open wrinkle:** admin-created coordinators bypass the self-registration service, so **both** their
+  `CoordinatorProfile` **and** their `COORDINATOR` group assignment (ADR-006 role↔Group sync) must be
+  handled at the **admin layer** (resolve when we build groups).
+
 ---
 
 ## 6. ServiceRequest state machine (current target)
@@ -245,6 +266,12 @@ SUBMITTED
 - [x] **Recommendation layer & Celery** — **DECIDED, see ADR-008**: sync rule-based Strategy service,
       Celery-ready; Celery introduced now for notifications.
 - [ ] **Eligibility rules** — what makes personnel "eligible" (skills, availability, location)?
+- [ ] **Coordinator ↔ request-type routing** *(deferred from profiles, 2026-08-01)* — a coordinator
+      handles **multiple** request types, and `RequestType` is **shared `servicing` vocabulary** (a
+      `ServiceRequest` has a type too). Model it in the **`servicing`** app alongside eligibility/routing
+      — as a `RequestType` concept + a coordinator-side **association living in `servicing`**, *not* a
+      field on `CoordinatorProfile` (that would create an `accounts → servicing` dependency **cycle**).
+      `CoordinatorProfile` stays `department` + `region` for now.
 - [ ] **Audit strategy** — how `AuditEvent` records every action immutably.
 - [ ] **External SaaS notification** — *delivery mechanism decided (Celery task, ADR-008)*; still open:
       which provider, payload/contract, idempotency & failure handling.
@@ -254,4 +281,4 @@ SUBMITTED
 
 ---
 
-*Last updated: 2026-07-31*
+*Last updated: 2026-08-01*
