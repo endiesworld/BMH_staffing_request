@@ -10,7 +10,7 @@ from django.utils import timezone
 from accounts import services as account_services
 from accounts.models import PersonnelProfile
 from servicing import services
-from servicing.models import RequestType, ServiceRequest
+from servicing.models import Assignment, RequestType, ServiceRequest
 
 
 class ServicingTestCase(TestCase):
@@ -375,3 +375,115 @@ class ApproveActionAdminTests(ServicingTestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+
+class AssignmentConstraintTests(ServicingTestCase):
+    """The two invariants the database holds for the second state machine."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.nurse = account_services.create_personnel(
+            email="nurse@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+        cls.other_nurse = account_services.create_personnel(
+            email="nurse2@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+
+    def make(self, service_request, personnel, **overrides):
+        return Assignment.objects.create(
+            service_request=service_request,
+            personnel=personnel,
+            assigned_by=self.coordinator,
+            **overrides,
+        )
+
+    def test_a_request_can_only_have_one_live_assignment(self):
+        """Two people must never both think a job is theirs."""
+        service_request = self.submit()
+        self.make(service_request, self.nurse)
+
+        # assertRaises, not assertRaisesMessage: SQLite names CHECK constraints
+        # in its errors but reports a partial-unique violation as
+        # "UNIQUE constraint failed: <table>.<column>" with no name. Postgres
+        # does include it. The readable message is asserted separately below,
+        # via validate_constraints(), which is portable.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.make(service_request, self.other_nurse)
+
+    def test_declined_assignments_do_not_block_reassignment(self):
+        """What the partial constraint buys: the reassign loop needs history.
+
+        A plain unique constraint on service_request would make declining a
+        dead end.
+        """
+        service_request = self.submit()
+        self.make(
+            service_request,
+            self.nurse,
+            status=Assignment.Status.DECLINED,
+            responded_at=timezone.now(),
+        )
+
+        # Same request, someone else, no conflict.
+        self.make(service_request, self.other_nurse)
+
+        self.assertEqual(service_request.assignments.count(), 2)
+
+    def test_accepted_assignment_also_blocks_a_second_one(self):
+        """"Live" is PENDING or ACCEPTED, not just PENDING."""
+        service_request = self.submit()
+        self.make(
+            service_request,
+            self.nurse,
+            status=Assignment.Status.ACCEPTED,
+            responded_at=timezone.now(),
+        )
+
+        # assertRaises, not assertRaisesMessage: SQLite names CHECK constraints
+        # in its errors but reports a partial-unique violation as
+        # "UNIQUE constraint failed: <table>.<column>" with no name. Postgres
+        # does include it. The readable message is asserted separately below,
+        # via validate_constraints(), which is portable.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.make(service_request, self.other_nurse)
+
+    def test_pending_assignment_cannot_carry_a_response_time(self):
+        with self.assertRaisesMessage(
+            IntegrityError, "assignment_responded_at_matches_status"
+        ):
+            with transaction.atomic():
+                self.make(
+                    self.submit(), self.nurse, responded_at=timezone.now()
+                )
+
+    def test_answered_assignment_must_record_when(self):
+        with self.assertRaisesMessage(
+            IntegrityError, "assignment_responded_at_matches_status"
+        ):
+            with transaction.atomic():
+                self.make(
+                    self.submit(), self.nurse, status=Assignment.Status.ACCEPTED
+                )
+
+    def test_live_assignment_conflict_reports_a_readable_message(self):
+        """Portable half: validate_constraints() surfaces the wording we set."""
+        service_request = self.submit()
+        self.make(service_request, self.nurse)
+
+        clash = Assignment(
+            service_request=service_request,
+            personnel=self.other_nurse,
+            assigned_by=self.coordinator,
+        )
+
+        with self.assertRaisesMessage(
+            ValidationError, "already has an assignment awaiting a response"
+        ):
+            clash.validate_constraints()

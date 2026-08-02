@@ -274,3 +274,88 @@ class ServiceRequest(models.Model):
         if remainder:
             parts.append(f"{remainder} minutes")
         return " ".join(parts) or "0 minutes"
+
+
+class Assignment(models.Model):
+    """One attempt to give a request to a specific personnel member.
+
+    The SECOND state machine (brief section 3, insight 1) -- deliberately not
+    conflated with ServiceRequest's. A request may accumulate many assignments
+    over time, because declining returns it to the pool for someone else, and
+    the declined rows are kept: they are the history of who was asked, and what
+    eligibility uses to avoid offering it back to someone who already said no.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Awaiting response"
+        ACCEPTED = "ACCEPTED", "Accepted"
+        DECLINED = "DECLINED", "Declined"
+
+    service_request = models.ForeignKey(
+        ServiceRequest,
+        on_delete=models.PROTECT,
+        related_name="assignments",
+    )
+    personnel = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="assignments",
+    )
+    # Who made the call. Kept on the row rather than left to the audit log,
+    # for the same reason as reviewed_by (ADR-010 D4): the coordinator's name
+    # is current-state data both sides need to see.
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="assignments_made",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # At most one LIVE assignment per request. Declined rows are exempt,
+            # so the reassign loop can leave as many behind as it needs. A plain
+            # unique constraint would forbid reassignment entirely; this is what
+            # the `condition` buys.
+            models.UniqueConstraint(
+                fields=["service_request"],
+                condition=models.Q(status__in=["PENDING", "ACCEPTED"]),
+                name="assignment_one_live_per_request",
+                violation_error_message=(
+                    "This request already has an assignment awaiting a response "
+                    "or accepted."
+                ),
+            ),
+            # Same shape as the review-fields rule: answered exactly when it is
+            # no longer pending.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(status="PENDING", responded_at__isnull=True)
+                    | (
+                        ~models.Q(status="PENDING")
+                        & models.Q(responded_at__isnull=False)
+                    )
+                ),
+                name="assignment_responded_at_matches_status",
+                violation_error_message=(
+                    "responded_at must be set if and only if the assignment has "
+                    "been accepted or declined."
+                ),
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.personnel} -> {self.service_request_id} "
+            f"({self.get_status_display()})"
+        )
