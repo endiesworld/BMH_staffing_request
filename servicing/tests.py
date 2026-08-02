@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
@@ -40,13 +41,26 @@ class ServicingTestCase(TestCase):
             required_sector=PersonnelProfile.SectorCategory.HEALTHCARE,
         )
 
-    def submit(self, title="Nursing visit"):
+    def submit(self, **overrides):
         return services.submit_request(
             client=self.client_user,
             request_type=self.request_type,
-            title=title,
-            description="Weekly check-in",
+            **{**self.request_details(), **overrides},
         )
+
+    @staticmethod
+    def request_details():
+        """The client-supplied half of a request (ADR-011 D5)."""
+        return {
+            "scheduled_start": timezone.now() + timedelta(days=3),
+            "expected_duration": timedelta(hours=2),
+            "description": "Weekly check-in",
+            "address_line1": "1600 Pennsylvania Ave NW",
+            "city": "Washington",
+            "state": "DC",
+            "postal_code": "20500",
+            "contact_phone": "+15551234567",
+        }
 
 
 class SubmitRequestTests(ServicingTestCase):
@@ -77,8 +91,7 @@ class SubmitRequestTests(ServicingTestCase):
             services.submit_request(
                 client=self.client_user,
                 request_type=retired,
-                title="Nope",
-                description="d",
+                **self.request_details(),
             )
 
         self.assertEqual(ServiceRequest.objects.count(), 0)
@@ -203,8 +216,7 @@ class ReviewFieldsConstraintTests(ServicingTestCase):
         return ServiceRequest.objects.create(
             client=self.client_user,
             request_type=self.request_type,
-            title="Nursing visit",
-            description="Weekly check-in",
+            **self.request_details(),
             **overrides,
         )
 
@@ -253,8 +265,7 @@ class ReviewFieldsConstraintTests(ServicingTestCase):
         service_request = ServiceRequest(
             client=self.client_user,
             request_type=self.request_type,
-            title="Nursing visit",
-            description="Weekly check-in",
+            **self.request_details(),
             status=ServiceRequest.Status.SUBMITTED,
             reviewed_by=self.coordinator,
             reviewed_at=timezone.now(),
@@ -273,8 +284,7 @@ class RejectionReasonConstraintTests(ServicingTestCase):
         return ServiceRequest.objects.create(
             client=self.client_user,
             request_type=self.request_type,
-            title="Nursing visit",
-            description="Weekly check-in",
+            **self.request_details(),
             reviewed_by=self.coordinator,
             reviewed_at=timezone.now(),
             **overrides,

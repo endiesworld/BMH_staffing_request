@@ -34,6 +34,44 @@ Full workflow and state machine: see brief §2 and §6.
 | Start dev server | `uv run python manage.py runserver` → `http://127.0.0.1:8000/admin/` |
 | Create an admin user | `uv run python manage.py createsuperuser` (prompts for **email**, not username) |
 | System checks | `uv run python manage.py check` |
+| Empty migration to hand-write | `uv run python manage.py makemigrations --empty <app>` |
+| List migrations + applied state | `uv run python manage.py showmigrations` |
+
+### Migrations come in two kinds
+`makemigrations` reads **`models.py`** — never views, forms, admin or templates. It diffs the models
+against the state recorded in previous migrations and writes the difference.
+
+| | **Schema** migration | **Data** migration |
+|---|---|---|
+| Changes | the table *structure* | the *rows* |
+| Operations | `CreateModel`, `AddField`, `AlterField` | `RunPython` |
+| Written by | `makemigrations` | **by hand** |
+| Why | Django can diff your models | the intent exists nowhere in `models.py`, so Django cannot guess it |
+
+**Rule of thumb:** hand-write a migration when what you want isn't derivable from the models — seed
+vocabulary, groups/permissions, backfilling a new column, reshaping existing rows.
+
+**This project's six:**
+```
+accounts/  0001_initial                  auto   User table
+           0002_clientprofile_...        auto   the three profile tables
+           0003_coordinator_group        HAND   COORDINATOR group + perms; backfills coordinators
+servicing/ 0001_initial                  auto   RequestType table
+           0002_seed_request_types       HAND   inserts the four request types
+           0003_servicerequest           auto   ServiceRequest table + 2 CheckConstraints
+```
+
+**Four things that bite when hand-writing one:**
+1. **`apps.get_model("app", "Model")`, never a direct import.** Migrations run against the *historical*
+   model state; a direct import binds to today's model and breaks the migration the moment a field is
+   added. This is the most common way data migrations rot.
+2. **Always supply a reverse function** to `RunPython`, or rollbacks are blocked. Reverse narrowly —
+   `0002` deletes only the four seeded codes, so admin-added types survive a rollback.
+3. **Permissions don't exist yet mid-migration.** They're created by a `post_migrate` signal that fires
+   *after* all migrations finish, so a migration granting permissions must create them early —
+   see `accounts/0003`'s `_ensure_permissions_exist()`.
+4. **Data migrations also run when building the test database**, so seeded rows are present in tests.
+   Have tests create their own fixtures rather than depending on seed data.
 
 ## 4. Architecture (apps) — ADR-007
 ```

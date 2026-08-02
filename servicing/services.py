@@ -75,10 +75,28 @@ def _transition(service_request: ServiceRequest, to_status: str, actor: User, **
     return locked
 
 
-def submit_request(client: User, request_type: RequestType, title: str, description: str):
+def submit_request(
+    client: User,
+    request_type: RequestType,
+    *,
+    scheduled_start,
+    expected_duration,
+    description: str,
+    address_line1: str,
+    city: str,
+    state: str,
+    postal_code: str,
+    contact_phone: str,
+    address_line2: str = "",
+):
     """Create a new request in SUBMITTED, awaiting coordinator review.
 
     Creation rather than a transition -- there is no prior state to check.
+    `scheduled_start` is a datetime and `expected_duration` a timedelta; together
+    they are the window fulfilment will later be checked against (ADR-011 D5).
+
+    Keyword-only after request_type: with this many fields, positional calls
+    would be a silent way to swap city and state.
     """
     if not request_type.is_active:
         raise ValueError(f"Request type '{request_type.code}' is no longer offered.")
@@ -87,8 +105,15 @@ def submit_request(client: User, request_type: RequestType, title: str, descript
         service_request = ServiceRequest.objects.create(
             client=client,
             request_type=request_type,
-            title=title,
+            scheduled_start=scheduled_start,
+            expected_duration=expected_duration,
             description=description,
+            address_line1=address_line1,
+            address_line2=address_line2,
+            city=city,
+            state=state,
+            postal_code=postal_code,
+            contact_phone=contact_phone,
         )
         _record_transition(service_request, "", Status.SUBMITTED, client)
 

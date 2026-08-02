@@ -1,7 +1,79 @@
 from django.conf import settings
+from django.core.validators import RegexValidator
 from django.db import models
 
 from accounts.models import PersonnelProfile
+
+
+class USState(models.TextChoices):
+    """US states + DC. Service is US-only for now (see ServiceRequest.country)."""
+
+    AL = "AL", "Alabama"
+    AK = "AK", "Alaska"
+    AZ = "AZ", "Arizona"
+    AR = "AR", "Arkansas"
+    CA = "CA", "California"
+    CO = "CO", "Colorado"
+    CT = "CT", "Connecticut"
+    DE = "DE", "Delaware"
+    DC = "DC", "District of Columbia"
+    FL = "FL", "Florida"
+    GA = "GA", "Georgia"
+    HI = "HI", "Hawaii"
+    ID = "ID", "Idaho"
+    IL = "IL", "Illinois"
+    IN = "IN", "Indiana"
+    IA = "IA", "Iowa"
+    KS = "KS", "Kansas"
+    KY = "KY", "Kentucky"
+    LA = "LA", "Louisiana"
+    ME = "ME", "Maine"
+    MD = "MD", "Maryland"
+    MA = "MA", "Massachusetts"
+    MI = "MI", "Michigan"
+    MN = "MN", "Minnesota"
+    MS = "MS", "Mississippi"
+    MO = "MO", "Missouri"
+    MT = "MT", "Montana"
+    NE = "NE", "Nebraska"
+    NV = "NV", "Nevada"
+    NH = "NH", "New Hampshire"
+    NJ = "NJ", "New Jersey"
+    NM = "NM", "New Mexico"
+    NY = "NY", "New York"
+    NC = "NC", "North Carolina"
+    ND = "ND", "North Dakota"
+    OH = "OH", "Ohio"
+    OK = "OK", "Oklahoma"
+    OR = "OR", "Oregon"
+    PA = "PA", "Pennsylvania"
+    RI = "RI", "Rhode Island"
+    SC = "SC", "South Carolina"
+    SD = "SD", "South Dakota"
+    TN = "TN", "Tennessee"
+    TX = "TX", "Texas"
+    UT = "UT", "Utah"
+    VT = "VT", "Vermont"
+    VA = "VA", "Virginia"
+    WA = "WA", "Washington"
+    WV = "WV", "West Virginia"
+    WI = "WI", "Wisconsin"
+    WY = "WY", "Wyoming"
+
+
+# 12345 or 12345-6789. Enforced on the model so it holds for every writer,
+# not only the client form.
+ZIP_CODE_VALIDATOR = RegexValidator(
+    regex=r"^\d{5}(-\d{4})?$",
+    message="Enter a ZIP code as 12345 or 12345-6789.",
+)
+
+# Stored normalised as +1 followed by ten digits; the form does the
+# normalising, so anything a client types is accepted and cleaned up.
+PHONE_VALIDATOR = RegexValidator(
+    regex=r"^\+1\d{10}$",
+    message="Enter a 10-digit US phone number.",
+)
 
 
 class RequestType(models.Model):
@@ -71,8 +143,34 @@ class ServiceRequest(models.Model):
         on_delete=models.PROTECT,
         related_name="service_requests",
     )
-    title = models.CharField(max_length=200)
+    # --- What the client is asking for, and when ------------------------
+    # ADR-011 D5: the client supplies the slot at submission. fulfil_request()
+    # will only accept a completion between scheduled_start and
+    # scheduled_start + expected_duration (+ grace), once Assignment exists.
+    scheduled_start = models.DateTimeField()
+    expected_duration = models.DurationField()
     description = models.TextField()
+
+    # --- Where the work happens -----------------------------------------
+    # Structured rather than one free-text line: the address is what personnel
+    # travel to, and "state" will drive coordinator routing by region later.
+    # Held on the request, not the client, because a client can raise requests
+    # for different sites.
+    address_line1 = models.CharField("address", max_length=255)
+    address_line2 = models.CharField(
+        "apartment, suite, etc.", max_length=255, blank=True
+    )
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=2, choices=USState.choices)
+    postal_code = models.CharField(
+        "ZIP code", max_length=10, validators=[ZIP_CODE_VALIDATOR]
+    )
+    # Stored though only one value is offered, so opening up to other countries
+    # later is a choices change rather than a backfill of existing rows.
+    country = models.CharField(
+        max_length=2, choices=[("US", "United States")], default="US"
+    )
+    contact_phone = models.CharField(max_length=12, validators=[PHONE_VALIDATOR])
     status = models.CharField(
         max_length=30,
         choices=Status.choices,
@@ -144,4 +242,35 @@ class ServiceRequest(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.title} ({self.get_status_display()})"
+        return (
+            f"{self.request_type} on "
+            f"{self.scheduled_start:%d %b %Y, %H:%M} "
+            f"({self.get_status_display()})"
+        )
+
+    @property
+    def location_display(self):
+        """One-line address for tables and the admin."""
+        street = ", ".join(filter(None, [self.address_line1, self.address_line2]))
+        return f"{street}, {self.city}, {self.state} {self.postal_code}"
+
+    @property
+    def contact_phone_display(self):
+        """+15551234567 -> (555) 123-4567."""
+        digits = self.contact_phone.removeprefix("+1")
+        if len(digits) != 10:
+            return self.contact_phone
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+
+    @property
+    def duration_display(self):
+        """"2 hours" rather than "2:00:00", for templates and the admin."""
+        minutes = int(self.expected_duration.total_seconds() // 60)
+        hours, remainder = divmod(minutes, 60)
+
+        parts = []
+        if hours:
+            parts.append(f"{hours} hour{'' if hours == 1 else 's'}")
+        if remainder:
+            parts.append(f"{remainder} minutes")
+        return " ".join(parts) or "0 minutes"

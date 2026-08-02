@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Raise a request — BMH Service Hub{% endblock %}
+
+{% block content %}
+  <h1>Raise a service request</h1>
+
+  <div class="card">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      {% if form.non_field_errors %}
+        <div class="msg error">{{ form.non_field_errors }}</div>
+      {% endif %}
+
+      {% for field in form %}
+        <div class="field">
+          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+          {% if field.errors %}
+            <ul class="errors">
+              {% for error in field.errors %}<li>{{ error }}</li>{% endfor %}
+            </ul>
+          {% endif %}
+        </div>
+      {% endfor %}
+
+      <button type="submit" class="btn">Submit request</button>
+      <a href="{% url 'servicing:my_requests' %}" class="btn secondary">Cancel</a>
+    </form>
+  </div>
+{% endblock %}

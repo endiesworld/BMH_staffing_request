@@ -56,7 +56,9 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        # Project-wide templates (base.html, registration/). App templates are
+        # still found by APP_DIRS below.
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -112,6 +114,13 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 
 USE_TZ = True
+
+
+# Authentication redirects. These accept named url patterns, not just paths.
+# LOGIN_URL is where @login_required sends anonymous visitors.
+LOGIN_URL = 'login'
+LOGIN_REDIRECT_URL = 'servicing:my_requests'
+LOGOUT_REDIRECT_URL = 'login'
 
 
 # Static files (CSS, JavaScript, Images)

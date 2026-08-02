@@ -1,8 +1,13 @@
 
 
+from django.contrib.auth.models import Group
 from django.db import transaction
 
 from .models import ClientProfile, CoordinatorProfile, PersonnelProfile, User
+
+# ADR-006 role <-> Group sync. Named after the Role value so the mapping is
+# mechanical; the group itself is created by accounts migration 0003.
+COORDINATOR_GROUP = "COORDINATOR"
 
 
 def create_client(email: str, password: str, organization_name: str, phone_number: str):
@@ -25,13 +30,25 @@ def create_coordinator(email: str, password: str, department: str, region: str):
     """
     
     with transaction.atomic():
-        user = User.objects.create_user(email=email, password=password, role=User.Role.COORDINATOR)
-        
+        user = User.objects.create_user(
+            email=email,
+            password=password,
+            role=User.Role.COORDINATOR,
+            # Coordinators work requests through the admin, so they need the
+            # door open. Access to anything inside it comes from the group below.
+            is_staff=True,
+        )
+
         coordinator_profile = CoordinatorProfile.objects.create(
             user=user,
             department=department,
             region=region
         )
+
+        # get_or_create rather than get: a test database built without the data
+        # migration would otherwise fail here rather than simply grant nothing.
+        group, _ = Group.objects.get_or_create(name=COORDINATOR_GROUP)
+        user.groups.add(group)
     return user
 
 

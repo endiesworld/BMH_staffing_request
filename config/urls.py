@@ -15,8 +15,16 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path
+from django.urls import include, path
+from django.views.generic import RedirectView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # Django's built-in auth views: login, logout, password change/reset.
+    # Gives us the url names 'login' and 'logout' that base.html references.
+    path('accounts/', include('django.contrib.auth.urls')),
+    path('requests/', include('servicing.urls')),
+    # Landing on the site drops a client straight into their own requests
+    # (and, if they are not logged in, into the login page).
+    path('', RedirectView.as_view(pattern_name='servicing:my_requests')),
 ]

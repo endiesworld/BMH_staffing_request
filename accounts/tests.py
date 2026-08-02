@@ -81,6 +81,47 @@ class CreateCoordinatorTests(TestCase):
         self.assertEqual(user.coordinator_profile.region, "North")
         
     
+    def test_coordinator_gets_admin_access_and_the_coordinator_group(self):
+        """ADR-006 role<->Group sync: the role alone opens no doors.
+
+        is_staff gets them through the admin door; the group decides what is
+        behind it. Without both, a coordinator either cannot log in or logs in
+        to an empty admin.
+        """
+        user = services.create_coordinator(
+            email="coord2@example.com",
+            password="s3cret-pass",
+            department="Logistics",
+            region="South",
+        )
+
+        self.assertTrue(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertEqual(
+            [group.name for group in user.groups.all()], ["COORDINATOR"]
+        )
+
+        # Permissions arrive via the group, not the user directly.
+        self.assertTrue(user.has_perm("servicing.view_servicerequest"))
+        self.assertTrue(user.has_perm("servicing.change_servicerequest"))
+        # ...and stop where they should: coordinators work requests, they do
+        # not provision accounts or delete history.
+        self.assertFalse(user.has_perm("servicing.delete_servicerequest"))
+        self.assertFalse(user.has_perm("accounts.add_user"))
+
+    def test_clients_get_no_admin_access(self):
+        """Only coordinators are staff. A client must never reach the admin."""
+        user = services.create_client(
+            email="plain-client@example.com",
+            password="s3cret-pass",
+            organization_name="Acme",
+            phone_number="+10000000000",
+        )
+
+        self.assertFalse(user.is_staff)
+        self.assertEqual(user.groups.count(), 0)
+        self.assertFalse(user.has_perm("servicing.view_servicerequest"))
+
     def test_rolls_back_user_when_profile_creation_fails(self):
         """Atomicity: if the profile write fails, the user write is undone too."""
         # Force the *second* step (profile creation) to blow up.

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}My requests — BMH Service Hub{% endblock %}
+
+{% block content %}
+  <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1.25rem;">
+    <h1 style="margin:0;">My requests</h1>
+    <a href="{% url 'servicing:submit_request' %}" class="btn" style="margin-left:auto;">
+      Raise a request
+    </a>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>When</th>
+          <th>Where</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for service_request in service_requests %}
+          <tr>
+            <td>
+              {{ service_request.request_type.name }}
+              {% if service_request.status == "REJECTED" and service_request.rejection_reason %}
+                <div class="muted" style="font-size:0.9rem;">
+                  Reason: {{ service_request.rejection_reason }}
+                </div>
+              {% endif %}
+            </td>
+            <td>
+              {{ service_request.scheduled_start|date:"j M Y, H:i" }}
+              <div class="muted" style="font-size:0.9rem;">
+                {{ service_request.duration_display }}
+              </div>
+            </td>
+            <td class="muted">{{ service_request.location_display }}</td>
+            <td>
+              <span class="pill s-{{ service_request.status }}">
+                {{ service_request.get_status_display }}
+              </span>
+            </td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="4" class="muted" style="padding:2rem 0.6rem; text-align:center;">
+              No requests yet.
+              <a href="{% url 'servicing:submit_request' %}">Raise your first one.</a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if is_paginated %}
+    <p class="muted" style="margin-top:1rem;">
+      {% if page_obj.has_previous %}
+        <a href="?page={{ page_obj.previous_page_number }}">Newer</a>
+      {% endif %}
+      Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+      {% if page_obj.has_next %}
+        <a href="?page={{ page_obj.next_page_number }}">Older</a>
+      {% endif %}
+    </p>
+  {% endif %}
+{% endblock %}
