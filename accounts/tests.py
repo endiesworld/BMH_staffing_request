@@ -161,7 +161,9 @@ class RegisterClientViewTests(TestCase):
 
     def test_registration_creates_user_and_profile_and_logs_them_in(self):
         """One post produces a complete client, signed in and ready to work."""
-        response = self.client.post(self.URL, self.VALID)
+        # follow=True so the assertion covers where they actually end up:
+        # registration -> "home" -> the client's own page.
+        response = self.client.post(self.URL, self.VALID, follow=True)
 
         self.assertRedirects(response, reverse("servicing:my_requests"))
 
@@ -228,7 +230,7 @@ class RegisterClientViewTests(TestCase):
         )
         self.client.force_login(user)
 
-        response = self.client.get(self.URL)
+        response = self.client.get(self.URL, follow=True)
 
         self.assertRedirects(response, reverse("servicing:my_requests"))
 
@@ -321,6 +323,60 @@ class AvailabilityViewTests(TestCase):
     def test_anonymous_visitors_are_redirected_to_login(self):
         """@login_required runs before @role_required, so no AttributeError."""
         response = self.client.get(self.URL)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response.url)
+
+
+class RoleHomeTests(TestCase):
+    """Each role has its own front door (config.views.home).
+
+    A single static LOGIN_REDIRECT_URL sent everyone to the client request
+    list, so personnel logged in and were met with a 403 from the client-only
+    role check.
+    """
+
+    def test_client_lands_on_their_requests(self):
+        user = services.create_client(
+            email="client@example.com",
+            password="s3cret-pass",
+            organization_name="Acme",
+            phone_number="+15550000000",
+        )
+        self.client.force_login(user)
+
+        self.assertRedirects(
+            self.client.get(reverse("home")), reverse("servicing:my_requests")
+        )
+
+    def test_personnel_land_on_their_assignments(self):
+        user = services.create_personnel(
+            email="nurse@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+        self.client.force_login(user)
+
+        self.assertRedirects(
+            self.client.get(reverse("home")), reverse("servicing:my_assignments")
+        )
+
+    def test_coordinator_lands_on_the_review_queue(self):
+        user = services.create_coordinator(
+            email="coord@example.com",
+            password="s3cret-pass",
+            department="Ops",
+            region="North",
+        )
+        self.client.force_login(user)
+
+        self.assertRedirects(
+            self.client.get(reverse("home")),
+            reverse("admin:servicing_servicerequest_changelist"),
+        )
+
+    def test_anonymous_visitors_go_to_login(self):
+        response = self.client.get(reverse("home"))
 
         self.assertEqual(response.status_code, 302)
         self.assertIn("/accounts/login/", response.url)

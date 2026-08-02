@@ -22,8 +22,9 @@ def register_client(request):
     cannot exist.
     """
     if request.user.is_authenticated:
-        # Already signed in -- nothing to register.
-        return redirect("servicing:my_requests")
+        # Already signed in -- nothing to register. `home` works out where they
+        # belong; hard-coding a page here would 403 the wrong role.
+        return redirect("home")
 
     if request.method == "POST":
         form = ClientRegistrationForm(data=request.POST)
@@ -42,7 +43,7 @@ def register_client(request):
                 request,
                 f"Welcome, {user.email}. You can raise your first request now.",
             )
-            return redirect("servicing:my_requests")
+            return redirect("home")
     else:
         form = ClientRegistrationForm()
 
@@ -61,7 +62,7 @@ def register_personnel(request):
     in is the next thing they need to do.
     """
     if request.user.is_authenticated:
-        return redirect("accounts:availability")
+        return redirect("home")
 
     if request.method == "POST":
         form = PersonnelRegistrationForm(data=request.POST)

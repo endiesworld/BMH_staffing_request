@@ -16,7 +16,8 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import include, path
-from django.views.generic import RedirectView
+
+from . import views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -26,7 +27,7 @@ urlpatterns = [
     path('accounts/', include('accounts.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
     path('requests/', include('servicing.urls')),
-    # Landing on the site drops a client straight into their own requests
-    # (and, if they are not logged in, into the login page).
-    path('', RedirectView.as_view(pattern_name='servicing:my_requests')),
+    # Front door: dispatches to whichever page suits the user's role, and to
+    # the login page if they are not signed in.
+    path('', views.home, name='home'),
 ]

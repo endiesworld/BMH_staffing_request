@@ -119,7 +119,8 @@ USE_TZ = True
 # Authentication redirects. These accept named url patterns, not just paths.
 # LOGIN_URL is where @login_required sends anonymous visitors.
 LOGIN_URL = 'login'
-LOGIN_REDIRECT_URL = 'servicing:my_requests'
+# Role-aware: a single static page would send personnel to the client list.
+LOGIN_REDIRECT_URL = 'home'
 LOGOUT_REDIRECT_URL = 'login'
 
 
