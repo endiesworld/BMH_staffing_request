@@ -1,7 +1,10 @@
 from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.template.response import TemplateResponse
 
 from . import services
-from .models import RequestType, ServiceRequest
+from .models import Assignment, RequestType, ServiceRequest
+from .recommendation import recommend_personnel
 
 
 # --- Request types: the one thing here that is meant to be edited by hand ---
@@ -50,7 +53,7 @@ class ServiceRequestAdmin(admin.ModelAdmin):
     search_fields = ("city", "postal_code", "description", "client__email")
     date_hierarchy = "scheduled_start"
     ordering = ("-created_at",)
-    actions = ("approve_requests",)
+    actions = ("approve_requests", "assign_personnel")
 
     def get_readonly_fields(self, request, obj=None):
         return [field.name for field in self.model._meta.fields]
@@ -92,6 +95,81 @@ class ServiceRequestAdmin(admin.ModelAdmin):
                 f"{approved} request(s) approved and released for assignment.",
                 level=messages.SUCCESS,
             )
+
+
+    @admin.action(
+        description="Assign personnel to the selected request",
+        permissions=["change"],
+    )
+    def assign_personnel(self, request, queryset):
+        """Two-step action: pick a candidate, then assign.
+
+        Django actions get a queryset, not a form, so anything needing extra
+        input renders an intermediate page and posts back to the same action.
+        The `apply` flag distinguishes the two passes.
+        """
+        # Candidates differ per request, so this only makes sense one at a time.
+        if queryset.count() != 1:
+            self.message_user(
+                request,
+                "Select exactly one request to assign.",
+                level=messages.WARNING,
+            )
+            return None
+
+        service_request = queryset.get()
+
+        if request.POST.get("apply"):
+            personnel_id = request.POST.get("personnel")
+            candidates = recommend_personnel(service_request)
+            profile = candidates.filter(user_id=personnel_id).first()
+
+            if profile is None:
+                # Eligibility is re-checked here, not trusted from the page the
+                # coordinator was looking at: availability can change between
+                # rendering the list and choosing from it.
+                self.message_user(
+                    request,
+                    "That person is no longer eligible. Try again.",
+                    level=messages.WARNING,
+                )
+                return None
+
+            try:
+                services.assign_request(service_request, profile.user, request.user)
+            except (services.IllegalTransition, ValueError) as exc:
+                self.message_user(request, str(exc), level=messages.WARNING)
+            else:
+                self.message_user(
+                    request,
+                    f"Assigned to {profile.user.email}, awaiting their response.",
+                    level=messages.SUCCESS,
+                )
+            return None
+
+        if service_request.status != ServiceRequest.Status.READY_FOR_ASSIGNMENT:
+            self.message_user(
+                request,
+                f"Only approved requests can be assigned. This one is "
+                f"{service_request.get_status_display()}.",
+                level=messages.WARNING,
+            )
+            return None
+
+        return TemplateResponse(
+            request,
+            "admin/servicing/assign_personnel.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": "Assign personnel",
+                "service_request": service_request,
+                "candidates": recommend_personnel(service_request),
+                "declined": service_request.assignments.filter(
+                    status=Assignment.Status.DECLINED
+                ).select_related("personnel"),
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            },
+        )
 
 
 admin.site.register(RequestType, RequestTypeAdmin)

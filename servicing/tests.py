@@ -10,6 +10,7 @@ from django.utils import timezone
 from accounts import services as account_services
 from accounts.models import PersonnelProfile
 from servicing import services
+from servicing.recommendation import recommend_personnel
 from servicing.models import Assignment, RequestType, ServiceRequest
 
 
@@ -487,3 +488,97 @@ class AssignmentConstraintTests(ServicingTestCase):
             ValidationError, "already has an assignment awaiting a response"
         ):
             clash.validate_constraints()
+
+
+class EligibilityTests(ServicingTestCase):
+    """Eligibility is a query, not a stored state (brief section 3)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.matching = account_services.create_personnel(
+            email="healthcare@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+        cls.wrong_sector = account_services.create_personnel(
+            email="logistics@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.LOGISTICS,
+        )
+
+    @staticmethod
+    def make_available(user):
+        profile = user.personnel_profile
+        profile.availability_status = PersonnelProfile.AvailabilityStatus.AVAILABLE
+        profile.save(update_fields=["availability_status"])
+        return user
+
+    def test_unavailable_personnel_are_invisible(self):
+        """Registering is not opting in -- the demo dead-end if you forget."""
+        self.assertEqual(list(recommend_personnel(self.submit())), [])
+
+    def test_only_matching_sector_is_offered(self):
+        self.make_available(self.matching)
+        self.make_available(self.wrong_sector)
+
+        candidates = recommend_personnel(self.submit())
+
+        self.assertEqual([p.user for p in candidates], [self.matching])
+
+    def test_someone_who_declined_is_not_offered_again(self):
+        """Otherwise the reassign loop hands it straight back to them."""
+        self.make_available(self.matching)
+        service_request = self.submit()
+        Assignment.objects.create(
+            service_request=service_request,
+            personnel=self.matching,
+            assigned_by=self.coordinator,
+            status=Assignment.Status.DECLINED,
+            responded_at=timezone.now(),
+        )
+
+        self.assertEqual(list(recommend_personnel(service_request)), [])
+
+
+class AssignRequestTests(EligibilityTests):
+    def approved(self):
+        return services.approve_request(self.submit(), self.coordinator)
+
+    def test_assigning_moves_both_state_machines(self):
+        self.make_available(self.matching)
+        service_request = self.approved()
+
+        assignment = services.assign_request(
+            service_request, self.matching, self.coordinator
+        )
+
+        service_request.refresh_from_db()
+        self.assertEqual(service_request.status, ServiceRequest.Status.ASSIGNED)
+        self.assertEqual(assignment.status, Assignment.Status.PENDING)
+        self.assertEqual(assignment.assigned_by, self.coordinator)
+        self.assertIsNone(assignment.responded_at)
+
+    def test_cannot_assign_a_request_that_was_not_approved(self):
+        self.make_available(self.matching)
+        service_request = self.submit()
+
+        with self.assertRaises(services.IllegalTransition):
+            services.assign_request(service_request, self.matching, self.coordinator)
+
+        self.assertEqual(Assignment.objects.count(), 0)
+
+    def test_cannot_assign_an_ineligible_person(self):
+        """Eligibility is enforced by the service, not just suggested by the UI."""
+        self.make_available(self.wrong_sector)
+        service_request = self.approved()
+
+        with self.assertRaises(ValueError):
+            services.assign_request(service_request, self.wrong_sector, self.coordinator)
+
+        # And the request must not have been left ASSIGNED with nothing assigned.
+        service_request.refresh_from_db()
+        self.assertEqual(
+            service_request.status, ServiceRequest.Status.READY_FOR_ASSIGNMENT
+        )
+        self.assertEqual(Assignment.objects.count(), 0)

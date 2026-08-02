@@ -4,7 +4,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import User
-from .models import RequestType, ServiceRequest
+from .models import Assignment, RequestType, ServiceRequest
+from .recommendation import recommend_personnel
 
 logger = logging.getLogger(__name__)
 
@@ -149,3 +150,37 @@ def reject_request(service_request: ServiceRequest, coordinator: User, rejection
             reviewed_at=timezone.now(),
             rejection_reason=rejection_reason,
         )
+
+
+def assign_request(service_request: ServiceRequest, personnel: User, coordinator: User):
+    """Give an approved request to a specific personnel member.
+
+    Two state machines move together here (brief section 3, insight 1): the
+    request goes READY_FOR_ASSIGNMENT -> ASSIGNED, and a fresh Assignment is
+    created in PENDING. Both inside one transaction, so a request can never be
+    ASSIGNED with nothing assigned to it.
+    """
+    with transaction.atomic():
+        # Transition first: it locks the row and validates the move, so an
+        # out-of-state request fails with IllegalTransition rather than the
+        # confusing unique-constraint error the Assignment insert would give.
+        locked = _transition(service_request, Status.ASSIGNED, actor=coordinator)
+
+        # Eligibility is enforced, not merely suggested -- otherwise a
+        # coordinator could assign someone in the wrong sector, or someone who
+        # never made themselves available.
+        eligible = recommend_personnel(locked).values_list("user_id", flat=True)
+        if personnel.pk not in eligible:
+            raise ValueError(
+                f"{personnel} is not eligible for this request: they must work in "
+                f"{locked.request_type.required_sector}, be available, and not "
+                f"have already declined it."
+            )
+
+        assignment = Assignment.objects.create(
+            service_request=locked,
+            personnel=personnel,
+            assigned_by=coordinator,
+        )
+
+    return assignment

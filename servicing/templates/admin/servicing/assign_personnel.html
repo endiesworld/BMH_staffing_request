@@ -1,0 +1,60 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <h1>Assign personnel</h1>
+
+  <p>
+    <strong>{{ service_request.request_type.name }}</strong> for
+    {{ service_request.client.email }}<br>
+    {{ service_request.scheduled_start|date:"j M Y, H:i" }}
+    ({{ service_request.duration_display }})<br>
+    {{ service_request.location_display }}
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    {# Carry the action and the selected row back to the same action. #}
+    <input type="hidden" name="action" value="assign_personnel">
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ service_request.pk }}">
+    <input type="hidden" name="apply" value="1">
+
+    {% if candidates %}
+      <p>
+        Eligible for
+        <strong>{{ service_request.request_type.get_required_sector_display }}</strong>,
+        currently available, and not already declined:
+      </p>
+      <ul style="list-style:none; padding-left:0;">
+        {% for profile in candidates %}
+          <li style="margin-bottom:0.5rem;">
+            <label>
+              <input type="radio" name="personnel" value="{{ profile.user_id }}"
+                     {% if forloop.first %}checked{% endif %}>
+              {{ profile.user.email }}
+              <span style="color:#666;">— {{ profile.get_sector_display }}</span>
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+      <input type="submit" value="Assign" class="default">
+    {% else %}
+      <p style="color:#a2201a;">
+        Nobody is eligible right now. Personnel must work in
+        <strong>{{ service_request.request_type.get_required_sector_display }}</strong>
+        and have marked themselves available.
+      </p>
+    {% endif %}
+
+    <a href="{% url 'admin:servicing_servicerequest_changelist' %}"
+       class="button cancel-link">Cancel</a>
+  </form>
+
+  {% if declined %}
+    <h2>Already declined</h2>
+    <ul>
+      {% for assignment in declined %}
+        <li>{{ assignment.personnel.email }} — {{ assignment.responded_at|date:"j M Y, H:i" }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endblock %}
