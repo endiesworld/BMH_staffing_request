@@ -399,9 +399,19 @@ SUBMITTED
 - **Note this is a *transition guard*, not a `CheckConstraint`** — it depends on `now()` and on the prior
   state, so per ADR-010 D3 it belongs in the service layer.
 - **RESOLVED 2026-08-02:** `scheduled_start` is **supplied by the client at submission** (with the
-  duration, from a fixed dropdown), not set by the coordinator at assignment. **Grace = 24 hours**,
-  deliberately generous: someone finishing a late job must not be locked out of recording work they
-  actually did, and the request stays visibly unfulfilled to the coordinator meanwhile.
+  duration, from a fixed dropdown), not set by the coordinator at assignment.
+- **Validity rule: from now onwards.** A past slot is refused — nobody could work it. Compared
+  against the start of the **current minute**, not the exact instant: `datetime-local` has minute
+  precision, so picking "now" and taking ten seconds to submit must not be rejected as past. The
+  form also prefills **now + 5 minutes**, which is valid and — thanks to the early-start grace —
+  immediately workable.
+- **The window has grace at BOTH edges:**
+  - **Early: 15 minutes.** Retained even under on-demand: review and assignment take a few minutes,
+    and clock skew between processes should never be what blocks someone from starting.
+  - **Late: 24 hours.** Someone finishing at the end of the day must not be locked out of recording
+    work they actually did; the request stays visibly unfulfilled to the coordinator meanwhile.
+  - Both edges govern **starting and completing alike**, so an early start is not a dead end where the
+    work cannot then be recorded.
 - **Applies to starting as well as completing** (ADR-012 D2) — beginning work three days early is as
   wrong as recording it late. Implemented as `_guard_service_window()`.
 - *Still open:* whether `expected_duration` should default from `RequestType`.

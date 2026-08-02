@@ -110,7 +110,11 @@ AUTH_USER_MODEL = 'accounts.User'
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# The wall clock the app presents and parses. datetime-local inputs submit
+# naive local time, so a mismatch here silently shifts every time a client
+# picks -- typing "5:25 PM" while this said UTC landed four hours in the past.
+# USE_TZ stays True: storage is always UTC, this is display and input only.
+TIME_ZONE = os.environ.get('TIME_ZONE', 'America/New_York')
 
 USE_I18N = True
 

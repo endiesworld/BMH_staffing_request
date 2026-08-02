@@ -117,7 +117,8 @@ group set manually.
 
 ## Walking the whole workflow
 
-1. **Client** registers, raises a request (service, date/time, duration, address, contact number).
+1. **Client** registers, raises a request (service, time, duration, address, contact number).
+   The time field prefills a few minutes ahead, so the request is workable straight away.
    → sees **Submitted**
 2. **Personnel** registers, picks their sector, sets themselves **Available**.
 3. **Coordinator** opens `/admin/servicing/servicerequest/`, ticks the request, runs
@@ -125,8 +126,8 @@ group set manually.
 4. **Coordinator** ticks it again, runs **Assign personnel to the selected request**, picks a
    candidate from the eligible list. → **Assigned**, personnel is emailed.
 5. **Personnel** opens their assignments, clicks **Accept**. → **Scheduled**, client is emailed.
-6. **Personnel** clicks **Start work** (only inside the booked slot). → **In progress**, client and
-   coordinator emailed.
+6. **Personnel** clicks **Start work** (allowed from 15 minutes before the slot).
+   → **In progress**, client and coordinator emailed.
 7. **Personnel** clicks **Mark complete**. → **Fulfilled**, client and coordinator emailed.
 
 Declining at step 5 sends the request back to **Ready for assignment**, and the person who

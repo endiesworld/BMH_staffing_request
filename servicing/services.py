@@ -111,7 +111,7 @@ def submit_request(
 
     Creation rather than a transition -- there is no prior state to check.
     `scheduled_start` is a datetime and `expected_duration` a timedelta; together
-    they are the window fulfilment will later be checked against (ADR-011 D5).
+    they are the window starting and completing are checked against (ADR-011 D5).
 
     Keyword-only after request_type: with this many fields, positional calls
     would be a silent way to swap city and state.

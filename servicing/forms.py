@@ -130,6 +130,29 @@ class ServiceRequestForm(forms.ModelForm):
             "%Y-%m-%dT%H:%M",
             "%Y-%m-%d %H:%M",
         ]
+        # Prefill a valid, immediately workable slot so raising a request is a
+        # few clicks rather than a typing exercise. Unbound forms only -- never
+        # overwrite what someone just submitted.
+        if not self.is_bound:
+            self.fields["scheduled_start"].initial = timezone.now() + timedelta(
+                minutes=5
+            )
+
+    def clean_scheduled_start(self):
+        """From now onwards. A slot in the past cannot be worked.
+
+        Compared against the start of the CURRENT MINUTE, not the exact instant:
+        a datetime-local input only has minute precision, so picking the current
+        minute and taking ten seconds to submit must not be rejected as "past".
+        """
+        scheduled_start = self.cleaned_data["scheduled_start"]
+        this_minute = timezone.now().replace(second=0, microsecond=0)
+
+        if scheduled_start < this_minute:
+            raise forms.ValidationError(
+                "Choose a time from now onwards -- a past slot cannot be worked."
+            )
+        return scheduled_start
 
     def clean_contact_phone(self):
         """Accept whatever the client types; store one canonical shape.
@@ -141,14 +164,6 @@ class ServiceRequestForm(forms.ModelForm):
             return normalize_us_phone(self.cleaned_data["contact_phone"])
         except ValueError as exc:
             raise forms.ValidationError(str(exc)) from exc
-
-    def clean_scheduled_start(self):
-        scheduled_start = self.cleaned_data["scheduled_start"]
-        if scheduled_start <= timezone.now():
-            raise forms.ValidationError(
-                "Choose a date and time in the future."
-            )
-        return scheduled_start
 
     def save(self, commit=True):
         # A ModelForm would happily write the row directly, skipping the

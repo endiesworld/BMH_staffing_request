@@ -63,10 +63,17 @@ class USState(models.TextChoices):
     WY = "WY", "Wyoming"
 
 
-# How long after a slot ends personnel may still record it as done (ADR-011 D5,
-# grace period). Generous on purpose: someone finishing late in the day should
-# not be locked out of recording work they actually did, and a coordinator can
-# still see the request sitting unfulfilled in the meantime.
+# The service window has grace at BOTH edges (ADR-011 D5).
+#
+# Early: personnel routinely arrive a few minutes before a slot, and refusing
+# to let them start would be pedantry. It also means a request scheduled a
+# minute or two out can be worked immediately, which is what makes the workflow
+# demonstrable without waiting around.
+EARLY_START_GRACE = timedelta(minutes=15)
+
+# Late: someone finishing a job at the end of the day must not be locked out of
+# recording work they actually did. The request stays visibly unfulfilled to the
+# coordinator in the meantime.
 FULFILMENT_GRACE = timedelta(hours=24)
 
 # 12345 or 12345-6789. Enforced on the model so it holds for every writer,
@@ -279,8 +286,8 @@ class ServiceRequest(models.Model):
 
     @property
     def service_window_opens_at(self):
-        """Work cannot start, or be recorded, before its slot."""
-        return self.scheduled_start
+        """When work may begin -- slightly before the slot, not on the dot."""
+        return self.scheduled_start - EARLY_START_GRACE
 
     @property
     def service_window_closes_at(self):

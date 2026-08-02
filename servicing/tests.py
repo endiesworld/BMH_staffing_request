@@ -11,6 +11,7 @@ from django.utils import timezone
 from accounts import services as account_services
 from accounts.models import PersonnelProfile
 from servicing import services
+from servicing.forms import ServiceRequestForm
 from servicing.recommendation import recommend_personnel
 from servicing.models import Assignment, RequestType, ServiceRequest
 
@@ -1088,3 +1089,101 @@ class NotificationTests(PersonnelFixtureMixin, ServicingTestCase):
         self.assertEqual(mail.outbox, [])
         service_request.refresh_from_db()
         self.assertEqual(service_request.status, ServiceRequest.Status.SUBMITTED)
+
+
+class EarlyStartGraceTests(PersonnelFixtureMixin, ServicingTestCase):
+    """The window opens slightly BEFORE the slot (ADR-011 D5).
+
+    Realistic -- personnel arrive early -- and it is what lets a request
+    scheduled a minute or two out be worked straight away.
+    """
+
+    def accepted(self, **overrides):
+        self.make_available(self.matching)
+        approved = services.approve_request(
+            self.submit(**overrides), self.coordinator
+        )
+        assignment = services.assign_request(approved, self.matching, self.coordinator)
+        return services.accept_assignment(assignment, self.matching)
+
+    def test_can_start_a_couple_of_minutes_early(self):
+        assignment = self.accepted(
+            scheduled_start=timezone.now() + timedelta(minutes=2)
+        )
+
+        started = services.start_work(assignment, self.matching)
+
+        self.assertEqual(started.status, ServiceRequest.Status.IN_PROGRESS)
+
+    def test_can_complete_immediately_after_an_early_start(self):
+        """The same window governs both, so an early start is not a dead end."""
+        assignment = self.accepted(
+            scheduled_start=timezone.now() + timedelta(minutes=2)
+        )
+        services.start_work(assignment, self.matching)
+
+        fulfilled = services.fulfil_request(assignment, self.matching)
+
+        self.assertEqual(fulfilled.status, ServiceRequest.Status.FULFILLED)
+
+    def test_grace_is_bounded_not_unlimited(self):
+        """An hour out is still too early -- this is a few minutes, not a bypass."""
+        assignment = self.accepted(
+            scheduled_start=timezone.now() + timedelta(hours=1)
+        )
+
+        with self.assertRaises(services.OutsideServiceWindow):
+            services.start_work(assignment, self.matching)
+
+
+class ScheduledStartValidationTests(ServicingTestCase):
+    """The client books from now onwards -- never a past slot."""
+
+    def form_for(self, offset):
+        return ServiceRequestForm(
+            data={
+                "request_type": self.request_type.pk,
+                # localtime(), not now(): a datetime-local input submits the
+                # user's wall clock, so the test must too. Building the string
+                # from UTC would shift every case by the offset.
+                "scheduled_start": timezone.localtime(
+                    timezone.now() + offset
+                ).strftime("%Y-%m-%dT%H:%M"),
+                "expected_duration": "120",
+                "address_line1": "1 Main St",
+                "city": "Newark",
+                "state": "NJ",
+                "postal_code": "07102",
+                "contact_phone": "(555) 123-4567",
+                "description": "d",
+            }
+        )
+
+    def test_a_future_slot_is_accepted(self):
+        self.assertTrue(self.form_for(timedelta(hours=3)).is_valid())
+
+    def test_the_current_minute_is_accepted(self):
+        """"From now onwards" includes now.
+
+        datetime-local has minute precision, so the value submitted for "now"
+        is already a few seconds old by the time it arrives. Comparing against
+        the exact instant would reject it.
+        """
+        self.assertTrue(self.form_for(timedelta()).is_valid())
+
+    def test_a_past_slot_is_refused(self):
+        form = self.form_for(-timedelta(hours=2))
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("from now onwards", form.errors["scheduled_start"][0])
+
+    def test_yesterday_is_refused(self):
+        self.assertFalse(self.form_for(-timedelta(days=1)).is_valid())
+
+    def test_an_unbound_form_prefills_a_valid_slot(self):
+        """Prefilled a few minutes ahead: valid, and immediately workable
+        thanks to the 15-minute early-start grace."""
+        initial = ServiceRequestForm().fields["scheduled_start"].initial
+
+        self.assertGreater(initial, timezone.now())
+        self.assertLess(initial, timezone.now() + timedelta(minutes=10))

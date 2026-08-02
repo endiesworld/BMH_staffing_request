@@ -3,10 +3,9 @@
 {% block title %}My assignments — BMH Service Hub{% endblock %}
 
 {% block content %}
-  <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1.25rem;">
-    <h1 style="margin:0;">My assignments</h1>
-    <a href="{% url 'accounts:availability' %}" class="btn secondary"
-       style="margin-left:auto;">Availability</a>
+  <div class="page-head">
+    <h1>My assignments</h1>
+    <a href="{% url 'accounts:availability' %}" class="btn secondary">Availability</a>
   </div>
 
   {% if profile.availability_status != "AVAILABLE" %}
@@ -19,7 +18,7 @@
 
   {% for assignment in assignments %}
     {% with sr=assignment.service_request %}
-      <div class="card" style="margin-bottom:1rem;">
+      <div class="card interactive" style="margin-bottom:1rem;">
         <div style="display:flex; align-items:flex-start; gap:1rem;">
           <div>
             <strong>{{ sr.request_type.name }}</strong>
@@ -39,7 +38,7 @@
         {% endif %}
 
         {% if assignment.status == "PENDING" %}
-          <div style="display:flex; gap:0.5rem; margin-top:1rem;">
+          <div class="actions">
             <form method="post"
                   action="{% url 'servicing:accept_assignment' assignment.pk %}">
               {% csrf_token %}
@@ -64,9 +63,9 @@
                 <button type="submit" class="btn">Start work</button>
               </form>
               <p class="muted" style="font-size:0.85rem; margin:0.5rem 0 0;">
-                Can be started between
-                {{ sr.service_window_opens_at|date:"j M Y, H:i" }} and
-                {{ sr.service_window_closes_at|date:"j M Y, H:i" }}.
+                Scheduled for {{ sr.scheduled_start|date:"j M Y, H:i" }}.
+                Can be started from
+                {{ sr.service_window_opens_at|date:"j M Y, H:i" }}.
               </p>
             </div>
           {% elif sr.status == "IN_PROGRESS" %}
@@ -93,8 +92,8 @@
       </div>
     {% endwith %}
   {% empty %}
-    <div class="card muted" style="text-align:center; padding:2rem;">
-      Nothing assigned to you yet.
+    <div class="card">
+      <div class="empty">Nothing assigned to you yet.</div>
     </div>
   {% endfor %}
 

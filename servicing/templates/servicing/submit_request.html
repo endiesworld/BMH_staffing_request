@@ -6,6 +6,7 @@
   <h1>Raise a service request</h1>
 
   <div class="card">
+
     <form method="post" novalidate>
       {% csrf_token %}
 
@@ -25,8 +26,10 @@
         </div>
       {% endfor %}
 
-      <button type="submit" class="btn">Submit request</button>
-      <a href="{% url 'servicing:my_requests' %}" class="btn secondary">Cancel</a>
+      <div class="actions" style="margin-top:0;">
+        <button type="submit" class="btn">Submit request</button>
+        <a href="{% url 'servicing:my_requests' %}" class="btn secondary">Cancel</a>
+      </div>
     </form>
   </div>
 {% endblock %}

@@ -3,14 +3,13 @@
 {% block title %}My requests — BMH Service Hub{% endblock %}
 
 {% block content %}
-  <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1.25rem;">
-    <h1 style="margin:0;">My requests</h1>
-    <a href="{% url 'servicing:submit_request' %}" class="btn" style="margin-left:auto;">
-      Raise a request
-    </a>
+  <div class="page-head">
+    <h1>My requests</h1>
+    <a href="{% url 'servicing:submit_request' %}" class="btn">Raise a request</a>
   </div>
 
   <div class="card">
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -46,7 +45,7 @@
           </tr>
         {% empty %}
           <tr>
-            <td colspan="4" class="muted" style="padding:2rem 0.6rem; text-align:center;">
+            <td colspan="4" class="empty">
               No requests yet.
               <a href="{% url 'servicing:submit_request' %}">Raise your first one.</a>
             </td>
@@ -54,10 +53,11 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </div>
 
   {% if is_paginated %}
-    <p class="muted" style="margin-top:1rem;">
+    <p class="muted" style="margin-top:1.25rem;">
       {% if page_obj.has_previous %}
         <a href="?page={{ page_obj.previous_page_number }}">Newer</a>
       {% endif %}
