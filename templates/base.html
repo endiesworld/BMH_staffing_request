@@ -87,7 +87,7 @@
           {% if user.role == "CLIENT" %}
             <a href="{% url 'servicing:my_requests' %}">My requests</a>
           {% elif user.role == "PERSONNEL" %}
-            <a href="{% url 'accounts:availability' %}">Availability</a>
+            <a href="{% url 'servicing:my_assignments' %}">My assignments</a>
           {% elif user.role == "COORDINATOR" %}
             <a href="/admin/servicing/servicerequest/">Review queue</a>
           {% endif %}

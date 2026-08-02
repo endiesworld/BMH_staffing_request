@@ -9,4 +9,17 @@ app_name = "servicing"
 urlpatterns = [
     path("", views.my_requests, name="my_requests"),
     path("new/", views.submit_request, name="submit_request"),
+    path("assignments/", views.my_assignments, name="my_assignments"),
+    # POST-only: accepting is a state change, so it must not be reachable by a
+    # link, a prefetch or an <img> tag.
+    path(
+        "assignments/<int:pk>/accept/",
+        views.accept_assignment,
+        name="accept_assignment",
+    ),
+    path(
+        "assignments/<int:pk>/decline/",
+        views.decline_assignment,
+        name="decline_assignment",
+    ),
 ]

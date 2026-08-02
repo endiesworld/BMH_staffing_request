@@ -10,6 +10,7 @@ from .recommendation import recommend_personnel
 logger = logging.getLogger(__name__)
 
 Status = ServiceRequest.Status
+AssignmentStatus = Assignment.Status
 
 # The brief section 6 state machine, encoded so it can be enforced rather than
 # just documented. Every status write in this module is checked against it.
@@ -24,13 +25,26 @@ TRANSITIONS = {
 }
 
 
-class IllegalTransition(Exception):
-    """Raised when a caller asks for a status change the state machine forbids."""
+# The SECOND state machine (brief section 3, insight 1). Kept separate from
+# TRANSITIONS on purpose: an Assignment's lifecycle is not a ServiceRequest's,
+# and conflating them is the mistake the brief calls out.
+ASSIGNMENT_TRANSITIONS = {
+    AssignmentStatus.PENDING: {AssignmentStatus.ACCEPTED, AssignmentStatus.DECLINED},
+    AssignmentStatus.ACCEPTED: set(),
+    AssignmentStatus.DECLINED: set(),
+}
 
-    def __init__(self, from_status: str, to_status: str):
+
+class IllegalTransition(Exception):
+    """Raised when a caller asks for a status change a state machine forbids."""
+
+    def __init__(self, from_status: str, to_status: str, subject: str = "request"):
         self.from_status = from_status
         self.to_status = to_status
-        super().__init__(f"Cannot move a request from {from_status} to {to_status}.")
+        self.subject = subject
+        super().__init__(
+            f"Cannot move a {subject} from {from_status} to {to_status}."
+        )
 
 
 def _record_transition(service_request: ServiceRequest, from_status: str, to_status: str, actor: User):
@@ -184,3 +198,59 @@ def assign_request(service_request: ServiceRequest, personnel: User, coordinator
         )
 
     return assignment
+
+
+def _transition_assignment(assignment: Assignment, to_status: str):
+    """Move an assignment to `to_status`, stamping when it was answered.
+
+    Must be called inside transaction.atomic(). Same shape as _transition:
+    re-read under a lock, validate against the map, then write -- so two taps
+    on Accept cannot both pass the check.
+    """
+    locked = Assignment.objects.select_for_update().get(pk=assignment.pk)
+
+    if to_status not in ASSIGNMENT_TRANSITIONS[locked.status]:
+        raise IllegalTransition(locked.status, to_status, subject="assignment")
+
+    locked.status = to_status
+    locked.responded_at = timezone.now()
+    locked.save(update_fields=["status", "responded_at", "updated_at"])
+    return locked
+
+
+def _guard_owner(assignment: Assignment, personnel: User):
+    """Only the person an assignment was given to may answer it.
+
+    The views also filter by owner, so this is the second layer -- it keeps the
+    service safe for callers that have no queryset in front of them.
+    """
+    if assignment.personnel_id != personnel.pk:
+        raise ValueError("This assignment belongs to someone else.")
+
+
+def accept_assignment(assignment: Assignment, personnel: User):
+    """Personnel accepts: the work is now theirs and the request is under way."""
+    _guard_owner(assignment, personnel)
+
+    with transaction.atomic():
+        accepted = _transition_assignment(assignment, AssignmentStatus.ACCEPTED)
+        _transition(accepted.service_request, Status.IN_PROGRESS, actor=personnel)
+
+    return accepted
+
+
+def decline_assignment(assignment: Assignment, personnel: User):
+    """Personnel declines: the request returns to the pool for someone else.
+
+    The declined row is kept deliberately -- it is what stops eligibility
+    offering this request back to the same person (recommendation.py rule 3).
+    """
+    _guard_owner(assignment, personnel)
+
+    with transaction.atomic():
+        declined = _transition_assignment(assignment, AssignmentStatus.DECLINED)
+        _transition(
+            declined.service_request, Status.READY_FOR_ASSIGNMENT, actor=personnel
+        )
+
+    return declined

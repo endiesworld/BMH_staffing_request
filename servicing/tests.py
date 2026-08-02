@@ -490,8 +490,14 @@ class AssignmentConstraintTests(ServicingTestCase):
             clash.validate_constraints()
 
 
-class EligibilityTests(ServicingTestCase):
-    """Eligibility is a query, not a stored state (brief section 3)."""
+class PersonnelFixtureMixin:
+    """Shared personnel cast -- a MIXIN, deliberately not a TestCase subclass.
+
+    Subclassing a TestCase inherits its test methods as well as its fixtures,
+    so they re-run under the subclass's setUp. That is exactly how
+    test_unavailable_personnel_are_invisible came to fail inside
+    AssignmentViewTests, whose setUp makes that very person available.
+    """
 
     @classmethod
     def setUpTestData(cls):
@@ -513,6 +519,10 @@ class EligibilityTests(ServicingTestCase):
         profile.availability_status = PersonnelProfile.AvailabilityStatus.AVAILABLE
         profile.save(update_fields=["availability_status"])
         return user
+
+
+class EligibilityTests(PersonnelFixtureMixin, ServicingTestCase):
+    """Eligibility is a query, not a stored state (brief section 3)."""
 
     def test_unavailable_personnel_are_invisible(self):
         """Registering is not opting in -- the demo dead-end if you forget."""
@@ -541,7 +551,7 @@ class EligibilityTests(ServicingTestCase):
         self.assertEqual(list(recommend_personnel(service_request)), [])
 
 
-class AssignRequestTests(EligibilityTests):
+class AssignRequestTests(PersonnelFixtureMixin, ServicingTestCase):
     def approved(self):
         return services.approve_request(self.submit(), self.coordinator)
 
@@ -582,3 +592,133 @@ class AssignRequestTests(EligibilityTests):
             service_request.status, ServiceRequest.Status.READY_FOR_ASSIGNMENT
         )
         self.assertEqual(Assignment.objects.count(), 0)
+
+
+class RespondToAssignmentTests(PersonnelFixtureMixin, ServicingTestCase):
+    """The second state machine, and how it drives the first."""
+
+    def assigned(self):
+        self.make_available(self.matching)
+        approved = services.approve_request(self.submit(), self.coordinator)
+        return services.assign_request(approved, self.matching, self.coordinator)
+
+    def test_accepting_moves_the_request_to_in_progress(self):
+        assignment = self.assigned()
+
+        accepted = services.accept_assignment(assignment, self.matching)
+
+        self.assertEqual(accepted.status, Assignment.Status.ACCEPTED)
+        self.assertIsNotNone(accepted.responded_at)
+        accepted.service_request.refresh_from_db()
+        self.assertEqual(
+            accepted.service_request.status, ServiceRequest.Status.IN_PROGRESS
+        )
+
+    def test_declining_returns_the_request_to_the_pool(self):
+        assignment = self.assigned()
+
+        declined = services.decline_assignment(assignment, self.matching)
+
+        self.assertEqual(declined.status, Assignment.Status.DECLINED)
+        declined.service_request.refresh_from_db()
+        self.assertEqual(
+            declined.service_request.status,
+            ServiceRequest.Status.READY_FOR_ASSIGNMENT,
+        )
+
+    def test_a_declined_request_can_be_reassigned_to_someone_else(self):
+        """The whole point of the loop, and of keeping declined rows."""
+        assignment = self.assigned()
+        services.decline_assignment(assignment, self.matching)
+
+        second = self.make_available(
+            account_services.create_personnel(
+                email="nurse-two@example.com",
+                password="s3cret-pass",
+                sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+            )
+        )
+        service_request = assignment.service_request
+        service_request.refresh_from_db()
+
+        reassigned = services.assign_request(
+            service_request, second, self.coordinator
+        )
+
+        self.assertEqual(reassigned.personnel, second)
+        self.assertEqual(service_request.assignments.count(), 2)
+
+    def test_cannot_answer_the_same_assignment_twice(self):
+        assignment = self.assigned()
+        services.accept_assignment(assignment, self.matching)
+
+        with self.assertRaises(services.IllegalTransition) as ctx:
+            services.decline_assignment(assignment, self.matching)
+
+        self.assertEqual(ctx.exception.subject, "assignment")
+
+    def test_cannot_answer_someone_elses_assignment(self):
+        assignment = self.assigned()
+
+        with self.assertRaises(ValueError):
+            services.accept_assignment(assignment, self.wrong_sector)
+
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, Assignment.Status.PENDING)
+
+
+class AssignmentViewTests(PersonnelFixtureMixin, ServicingTestCase):
+    def setUp(self):
+        self.make_available(self.matching)
+        approved = services.approve_request(self.submit(), self.coordinator)
+        self.assignment = services.assign_request(
+            approved, self.matching, self.coordinator
+        )
+        self.client.force_login(self.matching)
+
+    def test_personnel_sees_only_their_own_assignments(self):
+        other = self.make_available(
+            account_services.create_personnel(
+                email="stranger@example.com",
+                password="s3cret-pass",
+                sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+            )
+        )
+        self.client.force_login(other)
+
+        response = self.client.get(reverse("servicing:my_assignments"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Nothing assigned to you yet")
+
+    def test_accept_through_the_view(self):
+        response = self.client.post(
+            reverse("servicing:accept_assignment", args=[self.assignment.pk]),
+            follow=True,
+        )
+
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.status, Assignment.Status.ACCEPTED)
+        self.assertContains(response, "Accepted.")
+
+    def test_accepting_is_post_only(self):
+        """A state change must not be reachable by a link or a prefetch."""
+        response = self.client.get(
+            reverse("servicing:accept_assignment", args=[self.assignment.pk])
+        )
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_another_persons_assignment_is_a_404(self):
+        stranger = account_services.create_personnel(
+            email="stranger@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+        self.client.force_login(stranger)
+
+        response = self.client.post(
+            reverse("servicing:accept_assignment", args=[self.assignment.pk])
+        )
+
+        self.assertEqual(response.status_code, 404)

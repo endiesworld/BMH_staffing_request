@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}My assignments — BMH Service Hub{% endblock %}
+
+{% block content %}
+  <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1.25rem;">
+    <h1 style="margin:0;">My assignments</h1>
+    <a href="{% url 'accounts:availability' %}" class="btn secondary"
+       style="margin-left:auto;">Availability</a>
+  </div>
+
+  {% if profile.availability_status != "AVAILABLE" %}
+    <div class="msg warning">
+      You are marked <strong>{{ profile.get_availability_status_display }}</strong>,
+      so you will not be offered new work.
+      <a href="{% url 'accounts:availability' %}">Change that</a>.
+    </div>
+  {% endif %}
+
+  {% for assignment in assignments %}
+    {% with sr=assignment.service_request %}
+      <div class="card" style="margin-bottom:1rem;">
+        <div style="display:flex; align-items:flex-start; gap:1rem;">
+          <div>
+            <strong>{{ sr.request_type.name }}</strong>
+            <div class="muted" style="font-size:0.9rem; margin-top:0.2rem;">
+              {{ sr.scheduled_start|date:"j M Y, H:i" }} · {{ sr.duration_display }}<br>
+              {{ sr.location_display }}<br>
+              Contact: {{ sr.contact_phone_display }}
+            </div>
+          </div>
+          <span class="pill s-{{ sr.status }}" style="margin-left:auto;">
+            {{ assignment.get_status_display }}
+          </span>
+        </div>
+
+        {% if sr.description %}
+          <p style="margin:0.9rem 0 0;">{{ sr.description }}</p>
+        {% endif %}
+
+        {% if assignment.status == "PENDING" %}
+          <div style="display:flex; gap:0.5rem; margin-top:1rem;">
+            <form method="post"
+                  action="{% url 'servicing:accept_assignment' assignment.pk %}">
+              {% csrf_token %}
+              <button type="submit" class="btn">Accept</button>
+            </form>
+            <form method="post"
+                  action="{% url 'servicing:decline_assignment' assignment.pk %}">
+              {% csrf_token %}
+              <button type="submit" class="btn secondary">Decline</button>
+            </form>
+          </div>
+        {% else %}
+          <p class="muted" style="margin:0.9rem 0 0; font-size:0.9rem;">
+            You {{ assignment.get_status_display|lower }} this on
+            {{ assignment.responded_at|date:"j M Y, H:i" }}.
+          </p>
+        {% endif %}
+      </div>
+    {% endwith %}
+  {% empty %}
+    <div class="card muted" style="text-align:center; padding:2rem;">
+      Nothing assigned to you yet.
+    </div>
+  {% endfor %}
+
+  {% if is_paginated %}
+    <p class="muted">
+      {% if page_obj.has_previous %}
+        <a href="?page={{ page_obj.previous_page_number }}">Newer</a>
+      {% endif %}
+      Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+      {% if page_obj.has_next %}
+        <a href="?page={{ page_obj.next_page_number }}">Older</a>
+      {% endif %}
+    </p>
+  {% endif %}
+{% endblock %}

@@ -1,14 +1,15 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.http import require_POST
 
 from accounts.decorators import role_required
 from accounts.models import User
 
 from . import services
 from .forms import ServiceRequestForm
-from .models import ServiceRequest
+from .models import Assignment, ServiceRequest
 
 PAGE_SIZE = 20
 
@@ -89,3 +90,77 @@ def my_requests(request):
         "is_paginated": page_obj.has_other_pages(),
     }
     return render(request, "servicing/my_requests.html", context)
+
+
+# --- Personnel ---------------------------------------------------------
+
+personnel_only = role_required(
+    User.Role.PERSONNEL, "Only personnel can view assignments."
+)
+
+
+@login_required
+@personnel_only
+def my_assignments(request):
+    """Everything this person has been offered, newest first."""
+    # Ownership by queryset again: another person's assignments never load.
+    assignments = (
+        Assignment.objects
+        .filter(personnel=request.user)
+        .select_related("service_request", "service_request__request_type")
+    )
+
+    paginator = Paginator(assignments, PAGE_SIZE)
+    page_obj = paginator.get_page(request.GET.get("page"))
+
+    return render(
+        request,
+        "servicing/my_assignments.html",
+        {
+            "assignments": page_obj,
+            "page_obj": page_obj,
+            "is_paginated": page_obj.has_other_pages(),
+            "profile": request.user.personnel_profile,
+        },
+    )
+
+
+def _respond(request, pk, service, success_message):
+    """Shared body for accept/decline: same guards, different service call."""
+    # Filtering by personnel here means a wrong pk is a 404, not a 403 -- an
+    # assignment that is not yours simply does not exist as far as you are
+    # concerned.
+    assignment = get_object_or_404(Assignment, pk=pk, personnel=request.user)
+
+    try:
+        service(assignment, request.user)
+    except (services.IllegalTransition, ValueError) as exc:
+        messages.warning(request, str(exc))
+    else:
+        messages.success(request, success_message)
+
+    return redirect("servicing:my_assignments")
+
+
+@require_POST
+@login_required
+@personnel_only
+def accept_assignment(request, pk):
+    return _respond(
+        request,
+        pk,
+        services.accept_assignment,
+        "Accepted. The client has been told the work is going ahead.",
+    )
+
+
+@require_POST
+@login_required
+@personnel_only
+def decline_assignment(request, pk):
+    return _respond(
+        request,
+        pk,
+        services.decline_assignment,
+        "Declined. The request has gone back to the coordinator to reassign.",
+    )
