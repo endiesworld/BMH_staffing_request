@@ -347,6 +347,55 @@ SUBMITTED
 - `Assignment` is deferred to the next slice: it carries its **own** state machine (`PENDING → ACCEPTED /
   DECLINED`, §3 insight 1). Two interacting state machines in one migration means debugging both at once.
 
+### ADR-011 — Asynchronous workflow: notification points, fulfilment ownership, fulfilment window
+- **Context (2026-08-02):** Modelling the *implemented* state machine exposed that `TRANSITIONS` declares
+  seven edges but only three can be performed. Three of the four gaps were the deliberate D6 deferral;
+  the fourth — **`IN_PROGRESS → FULFILLED` had no owner at all** — was a real hole never covered by
+  ADR-001/002, which settled only the *review* gate. Clarifying it surfaced the async/notification shape.
+- **Key distinction (worth stating aloud):** *workflow-async* ≠ *technically-async*.
+  - The client submits and does **not** wait for the outcome; review happens hours or days later. The
+    state machine is **already** async in this sense **by construction** — no machinery required.
+  - Only **notification delivery** needs technical async (external, flaky, retry-prone) — exactly the
+    Celery use ADR-008 already authorised. So this ADR names **unbuilt work**, not an architecture change.
+
+**D1 — "Request received, under review" is the HTTP response, not a notification.** Only outcomes the
+  client cannot see synchronously get pushed.
+
+**D2 — Notification points (client-facing, Celery tasks):** on **rejection**, and on **personnel
+  acceptance**. *Open: whether fulfilment also notifies the client.*
+
+**D3 — Notifications dispatch via `transaction.on_commit()`; audit writes stay inside the transaction.**
+- Both hang off the same seam (a transition happened) but must fire at **different moments**:
+  ```python
+  with transaction.atomic():
+      _record_transition(...)                               # INSIDE  -- commits atomically with status
+      transaction.on_commit(lambda: notify_client.delay())  # AFTER   -- must not fire on rollback
+  ```
+- **Why:** enqueuing a Celery task inside the transaction produces one of two classic bugs — the worker
+  picks the task up **before the commit lands** and reads a row that does not exist yet, or the
+  transaction **rolls back** and the client has already been told about a rejection that never happened.
+  The most common Django + Celery mistake; `on_commit` is the fix.
+
+**D4 — `IN_PROGRESS → FULFILLED` is performed by the assigned personnel.** Closes the ADR-011 context gap.
+- Consistent with the §4 principle: completion **is** a decision (someone asserts the work is done), not
+  an automatic system event as §2's "System updates status" implied.
+- **Consequence:** identifying *the assigned personnel* requires `Assignment`, so `fulfil_request()`
+  cannot precede the Assignment slice. Confirms ADR-010 D6's ordering.
+
+**D5 — Fulfilment is only accepted inside a scheduled window.**
+- `ServiceRequest` gains **`scheduled_start`** + **`expected_duration`**; `fulfil_request()` is allowed
+  only when `scheduled_start <= now <= scheduled_start + expected_duration + grace`.
+  - **Too early** → "work has not started yet". **Too late** → "window closed, contact coordinator".
+- **Note this is a *transition guard*, not a `CheckConstraint`** — it depends on `now()` and on the prior
+  state, so per ADR-010 D3 it belongs in the service layer.
+- **Open:** where `scheduled_start` comes from (client-requested at submission vs. coordinator-set at
+  assignment); the grace period; whether `expected_duration` defaults from `RequestType`.
+
+**D6 — Deploy scope for 2026-08-02: the review slice only.** Tests + admin + settings/env hygiene ship;
+  `Assignment`, notifications (Celery + Redis broker + worker) and scheduling are **decided but not
+  built**. Rationale: introducing a broker and a worker process for the first time on deploy day is the
+  risk, not the code.
+
 ---
 
 ## 6. ServiceRequest state machine (current target)
@@ -375,6 +424,17 @@ SUBMITTED
 - [x] **`servicing` foundation** — **DECIDED, see ADR-010**: `RequestType` as a reference table, hybrid
       state representation (`status` column + append-only audit log), all transitions through the service
       layer with a transition map + `select_for_update()`, review outcome inline, `Assignment` deferred.
+- [x] **Async workflow, notification points & fulfilment** — **DECIDED, see ADR-011**: personnel owns
+      `IN_PROGRESS → FULFILLED` inside a scheduled window; notifications on rejection + acceptance,
+      dispatched via `transaction.on_commit()`. Decided, **not built**.
+- [ ] **State-machine gaps still open** *(surfaced 2026-08-02 when the implemented machine was modelled;
+      gap #1, fulfilment ownership, was closed by ADR-011 D4)*:
+      1. **No failure path after approval** — `REJECTED` is reachable only from `SUBMITTED`, so the model
+         cannot express *work started and could not be completed*.
+      2. **No cancellation** — a client whose need disappears has no exit, and `PROTECT` means the
+         request cannot be deleted either.
+      3. **Unbounded decline loop** — `ASSIGNED → READY_FOR_ASSIGNMENT → ASSIGNED → …` has no attempt
+         counter and no escape, so a request nobody accepts cycles forever undetected.
 - [ ] **Eligibility rules** — what makes personnel "eligible" (skills, availability, location)? *Its
       **home** is decided (ADR-010 D1): the rule lives as **data on `RequestType`** (e.g.
       `required_sector`), so eligibility is a **query**, not code. The rule set itself is still open.*

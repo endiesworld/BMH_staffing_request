@@ -88,24 +88,34 @@ Rule for splitting apps: **coupling/cohesion, not category.**
 - [ ] **Deployment walking skeleton + CI/CD** — ADR-005 (Postgres, Gunicorn, WhiteNoise, health
       endpoint, Redis + Celery worker, K8s homelab, pipeline).
 
-## 7. Recommended next step — build the first `servicing` slice
-**Design is settled: see ADR-010** (request type, state representation, transitions, review outcome,
-scope). Nothing is built yet. Build order:
+## 7. `servicing` — the review slice (in progress)
+Design: **ADR-010** (models, transitions, review outcome) and **ADR-011** (async workflow, fulfilment).
 
-1. **`RequestType`** model — `name` (unique) + `required_sector` (reuses
-   `PersonnelProfile.SectorCategory`). A reference table, admin-registered.
-2. **`ServiceRequest`** model — `client` FK (**`on_delete=PROTECT`**), `request_type` FK, `title`,
-   `description`, `status` (`TextChoices`, default `SUBMITTED`), `reviewed_by` / `reviewed_at` /
-   `rejection_reason` (nullable), `created_at`, `updated_at`.
-3. **`CheckConstraint`** tying the review fields to `status` (ADR-010 D4) — the invariant that keeps
-   three nullable columns honest.
-4. **`servicing/services.py`** — the transition map + `submit_request` / `approve_request` /
-   `reject_request`. Each: `transaction.atomic()` → `select_for_update()` → validate transition →
-   write `status` → write the audit row.
-5. **Tests** — happy paths, an illegal transition, and the constraint firing.
+**Built and verified:**
+1. ✅ **`RequestType`** — `code` (stable slug identity) + `name` (display) + `required_sector` +
+   `is_active`. Migration `0001_initial`.
+2. ✅ **Seed data migration** `0002_seed_request_types` — four types, one per `SectorCategory`.
+   Bootstrap only; the admin owns the vocabulary from here.
+3. ✅ **`ServiceRequest`** + **two `CheckConstraint`s** (review fields ↔ status; rejection reason ↔
+   `REJECTED`). Migration `0003_servicerequest`. Constraints probed: all illegal rows refused.
+4. ✅ **`servicing/services.py`** — `TRANSITIONS` map, `IllegalTransition`, `_transition`
+   (`select_for_update` → check → write → record), `submit_request` / `approve_request` /
+   `reject_request`. Probed: legal paths pass, illegal transitions and bad arguments blocked.
 
-**Out of scope this slice (deliberate):** `Assignment` and its own state machine; coordinator↔type
-routing; the audit app's final schema.
+**Remaining to ship today:**
+5. ⬜ **Tests** (`servicing/tests.py`) — happy paths, illegal transitions, constraints firing.
+6. ⬜ **Admin** — `RequestType` with `prepopulated_fields = {"code": ("name",)}` (**never** auto-slug in
+   `save()` — a rename would silently change the identifier). `ServiceRequest` read-mostly.
+7. ⬜ **Settings/env hygiene** (ADR-004) — `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, DB from env.
+
+**Decided but deliberately NOT built (ADR-011 D6):** `Assignment` + its state machine, `fulfil_request`
+and the scheduled window, notifications (Celery + Redis), coordinator↔type routing, the `audit` app.
+
+**Known seam:** `_record_transition()` currently writes an INFO log line, not an `AuditEvent` row —
+history is degraded, not discarded. One function body changes when `audit` lands.
+
+**Known limitation:** `select_for_update()` is a **silent no-op on SQLite**; the concurrency protection
+in `_transition` only becomes real on Postgres.
 
 ## 8. Key files
 ```
