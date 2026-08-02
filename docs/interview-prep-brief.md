@@ -2,6 +2,9 @@
 
 > A living design document. We add to it as we make decisions. It doubles as your
 > interview talking-point script: every decision below is something you can defend out loud.
+>
+> **Resuming work?** Start with [`project-status.md`](./project-status.md) — current state, how to
+> run, and next steps. This file is the *why* behind it all.
 
 ---
 
@@ -236,9 +239,113 @@ SUBMITTED
      deferred; any field added later must be `null`/`blank` or defaulted to keep migrations clean.
 - **Invariant:** every user has exactly one matching profile — Client → ClientProfile,
   Personnel → PersonnelProfile, Coordinator → CoordinatorProfile.
-- **Open wrinkle:** admin-created coordinators bypass the self-registration service, so **both** their
-  `CoordinatorProfile` **and** their `COORDINATOR` group assignment (ADR-006 role↔Group sync) must be
-  handled at the **admin layer** (resolve when we build groups).
+- **Wrinkle — profile half RESOLVED (2026-08-01):** admin-created coordinators get their
+  `CoordinatorProfile` via **role-aware `StackedInline`s** on the User admin — `get_inlines()` shows
+  only the profile matching `obj.role` (two-step: save user → fill the profile inline; atomicity comes
+  from the admin's own transaction; deliberately *not* forced, since superusers are `role=CLIENT` and
+  need no profile). **Still open:** their `COORDINATOR` **group** assignment (ADR-006 role↔Group sync)
+  — pending the groups work.
+
+### ADR-010 — `servicing` foundation: request type, state representation, transitions, review outcome
+- **Context:** First slice of the `servicing` app. Four coupled questions had to be settled *before* any
+  model was written: how the **request-type vocabulary** is stored, how a request's **state** is
+  represented, how **transitions** execute safely, and whether **review** is an entity or a set of
+  attributes.
+- **Cross-cutting principle (this is what settles D1 vs. D4, which otherwise look inconsistent):** build
+  for **committed work, not imaginable work**; and where uncertain, prefer the option whose *"I was
+  wrong"* migration is **cheap and lossless**. One-row-becomes-many is a **widening** change (mechanical);
+  many-rows-become-one is **lossy** (you must choose which row survives).
+
+**D1 — `RequestType` is a model (reference table), not a `TextChoices` enum.**
+- Two **committed** §7 items hang off request type: **coordinator↔type routing** and **eligibility
+  rules**. Routing is genuinely **many-to-many** (a coordinator handles several types; a type is handled
+  by several coordinators), so a **join table** is required *either way* — the only real question is
+  whether its right-hand column holds an unvalidated **string** or an **FK**. The FK buys **referential
+  integrity** free: you cannot reference a type that doesn't exist, nor delete one still in use. The enum
+  version is "a lookup table with extra steps, minus the integrity."
+- An enum member **cannot carry data**, and eligibility is data *about a type*. As a model,
+  `required_sector` is just a column, and "identify eligible personnel" collapses to a query —
+  `PersonnelProfile.objects.filter(sector=req.request_type.required_sector, availability_status=AVAILABLE)`
+  — matching the §3 insight that eligibility is **a query, not a state**.
+- **Costs accepted:** a join on read (`select_related`), no code-level constants (tests/fixtures must
+  create rows), one more model + migration. **Bought:** *runtime extensibility* — the vocabulary changes
+  without a deploy.
+
+**D2 — State representation is the **hybrid**: a mutable `status` column *plus* an append-only log.**
+- Three shapes considered: **(a) mutable `status` only** — trivial, but overwrites destroy history;
+  disqualifying for a system whose stated purpose includes recording every action. **(b) Event sourcing**
+  — events are the source of truth, current state is replayed; perfect history, but every read becomes a
+  replay, forcing **projections** — two systems and a sync process, a heavy architecture for this problem.
+  **(c) Hybrid.**
+- **Chosen: (c).** `status` is the **read model** (indexed, fast — what a coordinator dashboard filters
+  on); `AuditEvent` is the **write history** (immutable `from`/`to`/`actor`/`timestamp`). Same information,
+  two shapes, two jobs — a mild form of **CQRS**.
+- **Already implied by ADR-007** (an append-only `audit` app *and* a `status` field); ADR-010 promotes it
+  to an explicit state-representation decision.
+- **Known cost:** the two halves can drift out of sync. Mitigated entirely by D3.
+
+**D3 — Every transition goes through the `servicing` service layer; nothing writes `status` directly.**
+- Continues the `accounts/services.py` pattern (ADR-009 D2): a named function owns the status write **and**
+  the audit row inside one `transaction.atomic()` — all-or-nothing, so the history cannot develop holes.
+- The §6 state machine is encoded as an explicit **transition map**, checked before every write:
+  ```
+  SUBMITTED             → REJECTED, READY_FOR_ASSIGNMENT
+  READY_FOR_ASSIGNMENT  → ASSIGNED
+  ASSIGNED              → IN_PROGRESS, READY_FOR_ASSIGNMENT   (declined → back to the pool)
+  IN_PROGRESS           → FULFILLED
+  REJECTED, FULFILLED   → terminal
+  ```
+- **Principle worth saying aloud: constraints validate *states*; application code validates
+  *transitions*.** A `CheckConstraint` only sees the row **as it is written** — never the previous value —
+  so it can enforce *"status is one of six values"* but never *"`FULFILLED` only from `IN_PROGRESS`"*.
+  (A DB trigger could, at the cost of scattering business rules across two languages — rejected.)
+- **Concurrency:** two coordinators assigning the same request both read `READY_FOR_ASSIGNMENT` *before*
+  either writes, so both pass the check → two assignments, one request. Fixed with `select_for_update()`
+  (a **pessimistic row lock**) inside the atomic block: the second reader blocks, then re-reads fresh
+  state and is correctly rejected. **Caveats:** must be inside `transaction.atomic()` (Django errors
+  otherwise), and it is a **silent no-op on SQLite** (file-level, not row-level locking) — it only becomes
+  real on Postgres (ADR-005). Written now anyway, because the bug is invisible in dev and appears in
+  production under load.
+
+**D4 — Review outcome lives as **inline fields** on `ServiceRequest`, not a `Review` model.**
+- Three options: **(a) inline fields**, **(b) a `Review` model**, **(c) nothing — read it from the audit
+  log** (the fields are, after all, a **denormalisation** of data `AuditEvent` already holds).
+- **(c) rejected on principle:** *an audit log should be deletable without changing application
+  behaviour* — you'd lose history, not function. Reading it for domain data makes `servicing` depend on
+  `audit`'s internals (against ADR-007's dependency direction) and forces domain-specific prose
+  (`rejection_reason`) into a generic, untyped log.
+- **Cardinality is provable, not assumed:** `SUBMITTED` is the initial state and the *only* entry to the
+  review gate; both exits (`REJECTED` **terminal**, `READY_FOR_ASSIGNMENT`) never return; the single loop
+  (`ASSIGNED` → decline → `READY_FOR_ASSIGNMENT`) lands **past** the gate. **No transition returns to
+  `SUBMITTED`** ⇒ a request is reviewed **exactly 0 or 1 times**. One review ⇒ attributes, not rows.
+- **Corroborated by ADR-003:** rejecting an `UNDER_REVIEW` ("claimed") state means review is an
+  **instantaneous act**, not a process with a lifecycle. Duration and intermediate states earn an entity;
+  instantaneous acts are attributes. The ADRs compose rather than contradict.
+- **Confirmed 2026-08-02:** one coordinator's approve/reject **is** the complete gate, and **a rejected
+  request is final** — no appeal path, no second clinical/financial sign-off foreseen.
+- **Fields:** `reviewed_by` (FK, nullable), `reviewed_at` (nullable), `rejection_reason`.
+- **Required companion — a `CheckConstraint`** (this *is* a single-row state rule, so per D3 the DB can
+  and should enforce it): `status = SUBMITTED` ⇒ `reviewed_by`/`reviewed_at` **NULL**; `status ≠ SUBMITTED`
+  ⇒ both **set**; `status = REJECTED` ⇒ `rejection_reason` **non-empty**. This converts three loose,
+  mutually-dependent nullable columns into a **DB-enforced invariant** that holds even if the service
+  layer is bypassed — strictly stronger than a `Review` model gives by default.
+- **REVISIT TRIGGER (mechanically checkable):** the moment **any transition into `SUBMITTED`** is added to
+  the D3 map — appeal, un-reject, "revise and resubmit" — cardinality becomes many and `Review` must
+  become a model. The migration is mechanical (three columns → one row each, drop columns). *Most likely
+  challenger: **"revise and resubmit"**, since terminal rejection is a deliberate choice.* **Multi-stage
+  approval** (two *different* concurrent sign-offs) would also force (b), and cannot be represented inline
+  at any price.
+
+**D5 — `ServiceRequest` field decisions.**
+- `client` FK → `settings.AUTH_USER_MODEL`, **`on_delete=PROTECT`**. `CASCADE` (correct for profiles,
+  which are meaningless without their user) would silently erase service history — unacceptable in an
+  audit-oriented system. `PROTECT` fails the delete **loudly**; de-identification (anonymise the person,
+  keep the records) is a separate, deliberate operation.
+- Plus `request_type` (FK), `title`, `description`, `status`, `created_at`, `updated_at`.
+
+**D6 — Slice scope: `RequestType` + `ServiceRequest` + submit/approve/reject only.**
+- `Assignment` is deferred to the next slice: it carries its **own** state machine (`PENDING → ACCEPTED /
+  DECLINED`, §3 insight 1). Two interacting state machines in one migration means debugging both at once.
 
 ---
 
@@ -265,14 +372,24 @@ SUBMITTED
       + fulfilment, internally modular) + `audit`; notifications a module inside `servicing`.
 - [x] **Recommendation layer & Celery** — **DECIDED, see ADR-008**: sync rule-based Strategy service,
       Celery-ready; Celery introduced now for notifications.
-- [ ] **Eligibility rules** — what makes personnel "eligible" (skills, availability, location)?
+- [x] **`servicing` foundation** — **DECIDED, see ADR-010**: `RequestType` as a reference table, hybrid
+      state representation (`status` column + append-only audit log), all transitions through the service
+      layer with a transition map + `select_for_update()`, review outcome inline, `Assignment` deferred.
+- [ ] **Eligibility rules** — what makes personnel "eligible" (skills, availability, location)? *Its
+      **home** is decided (ADR-010 D1): the rule lives as **data on `RequestType`** (e.g.
+      `required_sector`), so eligibility is a **query**, not code. The rule set itself is still open.*
 - [ ] **Coordinator ↔ request-type routing** *(deferred from profiles, 2026-08-01)* — a coordinator
       handles **multiple** request types, and `RequestType` is **shared `servicing` vocabulary** (a
       `ServiceRequest` has a type too). Model it in the **`servicing`** app alongside eligibility/routing
       — as a `RequestType` concept + a coordinator-side **association living in `servicing`**, *not* a
       field on `CoordinatorProfile` (that would create an `accounts → servicing` dependency **cycle**).
-      `CoordinatorProfile` stays `department` + `region` for now.
-- [ ] **Audit strategy** — how `AuditEvent` records every action immutably.
+      `CoordinatorProfile` stays `department` + `region` for now. *Mechanism now decided (ADR-010 D1):
+      a **`ManyToManyField`** from a `servicing`-side coordinator association to `RequestType`. Not yet
+      built — deferred past the D6 slice.*
+- [ ] **Audit strategy** — how `AuditEvent` records every action immutably. *Its **role** is decided
+      (ADR-010 D2/D3): the write-history half of the hybrid, written in the same `transaction.atomic()`
+      as the status change. Still open: its schema and how it references many models without a
+      dependency tangle.*
 - [ ] **External SaaS notification** — *delivery mechanism decided (Celery task, ADR-008)*; still open:
       which provider, payload/contract, idempotency & failure handling.
 - [ ] **Settings/env hygiene** — move `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, DB to env vars (per ADR-004).
@@ -281,4 +398,4 @@ SUBMITTED
 
 ---
 
-*Last updated: 2026-08-01*
+*Last updated: 2026-08-02*
