@@ -361,8 +361,18 @@ SUBMITTED
 **D1 — "Request received, under review" is the HTTP response, not a notification.** Only outcomes the
   client cannot see synchronously get pushed.
 
-**D2 — Notification points (client-facing, Celery tasks):** on **rejection**, and on **personnel
-  acceptance**. *Open: whether fulfilment also notifies the client.*
+**D2 — Notification points.** *(Extended and BUILT 2026-08-02.)*
+
+| Event | Notified |
+|---|---|
+| assigned | **personnel** — added: otherwise they only learn of work by refreshing a page |
+| accepted | client |
+| **started** | client + **coordinator** |
+| **completed** | client + **coordinator** |
+| rejected | client |
+
+  Coordinators are notified on start and completion because they own the request after review.
+  *Still open: which provider (console backend for now).*
 
 **D3 — Notifications dispatch via `transaction.on_commit()`; audit writes stay inside the transaction.**
 - Both hang off the same seam (a transition happened) but must fire at **different moments**:
@@ -388,13 +398,109 @@ SUBMITTED
   - **Too early** → "work has not started yet". **Too late** → "window closed, contact coordinator".
 - **Note this is a *transition guard*, not a `CheckConstraint`** — it depends on `now()` and on the prior
   state, so per ADR-010 D3 it belongs in the service layer.
-- **Open:** where `scheduled_start` comes from (client-requested at submission vs. coordinator-set at
-  assignment); the grace period; whether `expected_duration` defaults from `RequestType`.
+- **RESOLVED 2026-08-02:** `scheduled_start` is **supplied by the client at submission** (with the
+  duration, from a fixed dropdown), not set by the coordinator at assignment. **Grace = 24 hours**,
+  deliberately generous: someone finishing a late job must not be locked out of recording work they
+  actually did, and the request stays visibly unfulfilled to the coordinator meanwhile.
+- **Applies to starting as well as completing** (ADR-012 D2) — beginning work three days early is as
+  wrong as recording it late. Implemented as `_guard_service_window()`.
+- *Still open:* whether `expected_duration` should default from `RequestType`.
 
-**D6 — Deploy scope for 2026-08-02: the review slice only.** Tests + admin + settings/env hygiene ship;
-  `Assignment`, notifications (Celery + Redis broker + worker) and scheduling are **decided but not
-  built**. Rationale: introducing a broker and a worker process for the first time on deploy day is the
-  risk, not the code.
+**D6 — Deploy scope for 2026-08-02: ~~the review slice only~~ SUPERSEDED same day.** The demo needed the
+  *complete* happy path to tell the story, so `Assignment`, personnel accounts, fulfilment and Celery
+  notifications were all built (ADR-012, ADR-013). Rejection was deprioritised instead: it is an
+  alternate path that can be described rather than demonstrated. Settings/env hygiene remains undone.
+
+### ADR-012 — Assignment, the second state machine, and splitting "accepted" from "started"
+- **Context:** ADR-010 D6 deferred `Assignment`. Building the full workflow for the demo brought it
+  forward, and doing so exposed a modelling error in the state machine itself.
+
+**D1 — `Assignment` is one row per *attempt*, with a partial unique constraint.**
+- A declined request must be reassignable, so `Assignment` accumulates rows and the declined ones are
+  **kept** — they are the record of who was asked, and what eligibility reads to avoid offering a
+  request back to someone who already said no.
+- The invariant is *"at most one **live** assignment per request"*, where live = `PENDING` **or**
+  `ACCEPTED`. Expressed as a **`UniqueConstraint` with a `condition`** (a partial unique index), so
+  declined rows are exempt. A plain unique constraint would forbid reassignment entirely.
+- **Portability note:** SQLite names CHECK constraints in its error messages but reports a partial
+  unique violation as `UNIQUE constraint failed: <table>.<column>`, with **no name**; Postgres includes
+  it. Tests therefore assert `IntegrityError` for the DB-level rule and use `validate_constraints()`
+  for the readable message.
+
+**D2 — `SCHEDULED` inserted between `ASSIGNED` and `IN_PROGRESS`.** *(Discovered 2026-08-02.)*
+- **The error:** accepting an assignment moved the request straight to `IN_PROGRESS`, so a client was
+  told work was under way when someone had merely *agreed to do it*. **Accepting and commencing are
+  two different events** and the model collapsed them.
+- Named `SCHEDULED` rather than `ACCEPTED` deliberately: it describes the **request's** condition (a
+  person and a slot are locked in) instead of duplicating the `Assignment` vocabulary, and it reads
+  correctly to a client.
+- Adds `started_at`, set by `start_work()` and governed by the same paired-nullable `CheckConstraint`
+  pattern as the review fields: present **iff** status is `IN_PROGRESS` or `FULFILLED`.
+- **`fulfil_request()` needs no explicit "was it started?" check** — the transition map already allows
+  `FULFILLED` only from `IN_PROGRESS`.
+- **Migration lesson:** `AddConstraint` **failed** on the populated dev database. The fix was to split
+  the migration — `AddField` → `AlterField` → **`RunPython` backfill** → `AddConstraint` — and the
+  backfill is *semantic*: rows sitting at `IN_PROGRESS` got there by acceptance under the old model,
+  which is precisely what `SCHEDULED` now means, so that is where they move.
+
+**D3 — Eligibility: three rules, one query** (implements ADR-008's recommendation layer).
+- `sector == request_type.required_sector`; `availability_status == AVAILABLE`; **has not already
+  declined this request**.
+- **Enforced by the service, not merely suggested by the UI** — `assign_request()` re-checks and
+  refuses, and the admin re-checks on submit rather than trusting the candidate list it rendered.
+- Behind a `RecommendationEngine` interface (Strategy), **synchronous**: a millisecond DB filter is
+  none of the four things ADR-008 says warrant a queue.
+- **Known gap:** no calendar check, so one person can hold two `ACCEPTED` assignments for overlapping
+  slots. A natural fourth rule.
+
+**D4 — Two machines move together, in one transaction.** Accepting writes `Assignment → ACCEPTED`
+  *and* `ServiceRequest → SCHEDULED`; declining writes `DECLINED` *and* `READY_FOR_ASSIGNMENT`. A crash
+  between them cannot leave a request `ASSIGNED` with a declined assignment. `IllegalTransition` gained
+  a `subject` so errors say "assignment" or "request" correctly.
+
+**D5 — Assignment visibility is a *pull* problem, not a notification problem.** *(2026-08-02.)*
+  Coordinators could assign but not **see** who held a request. No notification fixes that — someone
+  opening the queue next morning needs the current state on screen. Added an `Assigned to` column
+  (live assignment only; prefetched, so it costs one query per page rather than one per row), an
+  inline showing the full attempt history including declines, a standalone `Assignment` admin, and
+  `view_assignment` on the `COORDINATOR` group.
+
+### ADR-013 — Web layer: function views, role gating, ownership by queryset
+- **Context:** the client and personnel UIs are the demo's entry point, so they had to be written and
+  understood quickly.
+
+**D1 — Function-based views, not class-based.** *(Reversed mid-build, deliberately.)*
+- Started as `FormView`/`ListView`. A CBV's flow lives in inherited methods — a GET runs seven of them,
+  none written here — which made the request/response cycle hard to follow.
+- **Rewritten as FBVs**: the whole flow (`if request.method == "POST"`, bound vs. unbound form, one
+  `render()` reached from both GET and invalid-POST) is readable top to bottom. Costs ~12 lines and
+  manual `Paginator`. **A view you cannot trace is a liability regardless of how idiomatic it is** —
+  and views are the thinnest part of this system, so they should be the best understood.
+
+**D2 — Roles gate pages; permissions gate the admin.**
+- `role_required(role)` in `accounts/decorators.py`, stacked **under** `@login_required` so `.role` is
+  never read on an `AnonymousUser`. There is no `can_submit_request` permission because nothing in
+  Django would consult one.
+- **Ownership is enforced by queryset filtering**, not permissions: Django permissions are **per model,
+  not per row**, so "may view *their own* requests" is not expressible as one. Another person's rows
+  never load, so there is nothing to forbid — and someone else's assignment is a **404, not a 403**.
+
+**D3 — Forms validate; services write.** `ServiceRequestForm.save()` and the registration forms'
+  `save()` **raise `NotImplementedError`**: a `ModelForm` would happily write the row and skip the
+  service layer's invariants. Listing `fields` explicitly (never `"__all__"`) means `status`,
+  `reviewed_by` and friends are unreachable from a crafted POST — **field omission beats field
+  validation**. The one exception is `AvailabilityForm`, which may `save()` directly because
+  availability is a plain field with no workflow attached.
+
+**D4 — A role-aware `home` view.** A single static `LOGIN_REDIRECT_URL` sent everyone to the client
+  request list, so personnel logged in and met a 403. `config/views.py:home` dispatches by role and is
+  also the site root. It lives in `config/` because routing **between** apps is a project concern —
+  in `accounts` it would mean accounts reversing `servicing` URLs, against ADR-007's DAG.
+
+**D5 — Input is normalised on the way in.** Phone numbers are stored as `+1XXXXXXXXXX` regardless of
+  what was typed (`accounts/validators.py`, shared by both apps). **The limit on what someone types is
+  not the limit on what you store** — the form field is wider than the column, because `ModelForm`
+  would otherwise reject `(555) 123-4567` before the normaliser ever ran.
 
 ---
 
@@ -406,10 +512,12 @@ SUBMITTED
 | `REJECTED` | Coordinator rejected (terminal) | `SUBMITTED` |
 | `READY_FOR_ASSIGNMENT` | Approved; eligible personnel can be assigned | `SUBMITTED`, `ASSIGNED` (on decline) |
 | `ASSIGNED` | Personnel assigned, awaiting their response | `READY_FOR_ASSIGNMENT` |
-| `IN_PROGRESS` | Personnel accepted | `ASSIGNED` |
+| `SCHEDULED` | Personnel accepted; agreed but **not yet started** (ADR-012 D2) | `ASSIGNED` |
+| `IN_PROGRESS` | Personnel has commenced the work | `SCHEDULED` |
 | `FULFILLED` | Work complete (terminal) | `IN_PROGRESS` |
 
-*(Assignment has its own smaller machine: `PENDING → ACCEPTED / DECLINED`.)*
+*(Assignment has its own smaller machine: `PENDING → ACCEPTED / DECLINED`, both terminal — completion
+belongs to the request, not the assignment.)*
 
 ---
 
@@ -427,6 +535,13 @@ SUBMITTED
 - [x] **Async workflow, notification points & fulfilment** — **DECIDED, see ADR-011**: personnel owns
       `IN_PROGRESS → FULFILLED` inside a scheduled window; notifications on rejection + acceptance,
       dispatched via `transaction.on_commit()`. Decided, **not built**.
+- [x] **Assignment, eligibility & fulfilment** — **DECIDED AND BUILT, see ADR-012**: `Assignment` with
+      a partial unique constraint, the `SCHEDULED` split, three eligibility rules, accept/decline/
+      start/complete.
+- [x] **Client & personnel web layer** — **DECIDED AND BUILT, see ADR-013**: function-based views,
+      role gating, ownership by queryset, self-registration, role-aware `home`.
+- [ ] **Double-booking** *(surfaced 2026-08-02, ADR-012 D3)* — eligibility ignores the calendar, so one
+      person can hold two `ACCEPTED` assignments for overlapping slots. A natural fourth rule.
 - [ ] **State-machine gaps still open** *(surfaced 2026-08-02 when the implemented machine was modelled;
       gap #1, fulfilment ownership, was closed by ADR-011 D4)*:
       1. **No failure path after approval** — `REJECTED` is reachable only from `SUBMITTED`, so the model
@@ -450,8 +565,9 @@ SUBMITTED
       (ADR-010 D2/D3): the write-history half of the hybrid, written in the same `transaction.atomic()`
       as the status change. Still open: its schema and how it references many models without a
       dependency tangle.*
-- [ ] **External SaaS notification** — *delivery mechanism decided (Celery task, ADR-008)*; still open:
-      which provider, payload/contract, idempotency & failure handling.
+- [x] **External notification** — **BUILT 2026-08-02** (ADR-011 D2/D3, ADR-008): five Celery tasks on a
+      Redis broker, queued from `transaction.on_commit()`, retry with backoff, tasks take IDs.
+      *Still open: which provider (console backend for now), payload contract, idempotency.*
 - [ ] **Settings/env hygiene** — move `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, DB to env vars (per ADR-004).
 - [ ] **Deployment stack (per ADR-005)** — Postgres, Gunicorn, WhiteNoise, health endpoint, Dockerfile.
 - [ ] **CI/CD** — pipeline tool (e.g. GitHub Actions) + delivery to K8s (direct `kubectl` vs. GitOps/Argo CD).

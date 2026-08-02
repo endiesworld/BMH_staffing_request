@@ -1,9 +1,10 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.core import mail
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -602,7 +603,12 @@ class RespondToAssignmentTests(PersonnelFixtureMixin, ServicingTestCase):
         approved = services.approve_request(self.submit(), self.coordinator)
         return services.assign_request(approved, self.matching, self.coordinator)
 
-    def test_accepting_moves_the_request_to_in_progress(self):
+    def test_accepting_schedules_but_does_not_start_the_work(self):
+        """Accepting and commencing are different events.
+
+        The client must not be told work is under way just because someone
+        agreed to do it.
+        """
         assignment = self.assigned()
 
         accepted = services.accept_assignment(assignment, self.matching)
@@ -611,8 +617,9 @@ class RespondToAssignmentTests(PersonnelFixtureMixin, ServicingTestCase):
         self.assertIsNotNone(accepted.responded_at)
         accepted.service_request.refresh_from_db()
         self.assertEqual(
-            accepted.service_request.status, ServiceRequest.Status.IN_PROGRESS
+            accepted.service_request.status, ServiceRequest.Status.SCHEDULED
         )
+        self.assertIsNone(accepted.service_request.started_at)
 
     def test_declining_returns_the_request_to_the_pool(self):
         assignment = self.assigned()
@@ -722,3 +729,362 @@ class AssignmentViewTests(PersonnelFixtureMixin, ServicingTestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+
+class FulfilRequestTests(PersonnelFixtureMixin, ServicingTestCase):
+    """ADR-011 D4/D5: the assigned personnel completes it, inside the window."""
+
+    def accepted(self, **request_overrides):
+        self.make_available(self.matching)
+        approved = services.approve_request(
+            self.submit(**request_overrides), self.coordinator
+        )
+        assignment = services.assign_request(
+            approved, self.matching, self.coordinator
+        )
+        return services.accept_assignment(assignment, self.matching)
+
+    def started(self, **request_overrides):
+        assignment = self.accepted(**request_overrides)
+        services.start_work(assignment, self.matching)
+        assignment.refresh_from_db()
+        return assignment
+
+    def test_completing_inside_the_window(self):
+        """Slot started an hour ago, two hours long -- we are mid-job."""
+        assignment = self.started(
+            scheduled_start=timezone.now() - timedelta(hours=1)
+        )
+
+        fulfilled = services.fulfil_request(assignment, self.matching)
+
+        self.assertEqual(fulfilled.status, ServiceRequest.Status.FULFILLED)
+
+    def test_cannot_complete_before_the_slot_starts(self):
+        assignment = self.accepted(
+            scheduled_start=timezone.now() + timedelta(days=2)
+        )
+
+        with self.assertRaises(services.OutsideServiceWindow) as ctx:
+            services.fulfil_request(assignment, self.matching)
+
+        self.assertIn("not due to start", str(ctx.exception))
+        # Untouched: still only scheduled, since it was never started either.
+        assignment.service_request.refresh_from_db()
+        self.assertEqual(
+            assignment.service_request.status, ServiceRequest.Status.SCHEDULED
+        )
+
+    def test_cannot_complete_after_the_grace_period(self):
+        """Slot ended two hours ago + 24h grace, so we are a day too late."""
+        assignment = self.accepted(
+            scheduled_start=timezone.now() - timedelta(hours=30)
+        )
+
+        with self.assertRaises(services.OutsideServiceWindow) as ctx:
+            services.fulfil_request(assignment, self.matching)
+
+        self.assertIn("window", str(ctx.exception))
+
+    def test_grace_period_still_allows_a_late_finish(self):
+        """Slot ended three hours ago -- inside the 24h grace."""
+        assignment = self.started(
+            scheduled_start=timezone.now() - timedelta(hours=5)
+        )
+
+        fulfilled = services.fulfil_request(assignment, self.matching)
+
+        self.assertEqual(fulfilled.status, ServiceRequest.Status.FULFILLED)
+
+    def test_window_errors_are_catchable_as_value_errors(self):
+        """OutsideFulfilmentWindow subclasses ValueError on purpose."""
+        assignment = self.accepted(
+            scheduled_start=timezone.now() + timedelta(days=2)
+        )
+
+        with self.assertRaises(ValueError):
+            services.fulfil_request(assignment, self.matching)
+
+    def test_cannot_complete_work_you_did_not_accept(self):
+        self.make_available(self.matching)
+        approved = services.approve_request(self.submit(), self.coordinator)
+        pending = services.assign_request(approved, self.matching, self.coordinator)
+
+        with self.assertRaises(ValueError):
+            services.fulfil_request(pending, self.matching)
+
+    def test_cannot_complete_someone_elses_work(self):
+        assignment = self.started(
+            scheduled_start=timezone.now() - timedelta(hours=1)
+        )
+
+        with self.assertRaises(ValueError):
+            services.fulfil_request(assignment, self.wrong_sector)
+
+    def test_completing_through_the_view(self):
+        assignment = self.started(
+            scheduled_start=timezone.now() - timedelta(hours=1)
+        )
+        self.client.force_login(self.matching)
+
+        response = self.client.post(
+            reverse("servicing:fulfil_assignment", args=[assignment.pk]),
+            follow=True,
+        )
+
+        assignment.service_request.refresh_from_db()
+        self.assertEqual(
+            assignment.service_request.status, ServiceRequest.Status.FULFILLED
+        )
+        self.assertContains(response, "Marked complete")
+
+
+class StartWorkTests(PersonnelFixtureMixin, ServicingTestCase):
+    """The transition the model was missing: accepted is not commenced."""
+
+    def accepted(self, **request_overrides):
+        self.make_available(self.matching)
+        approved = services.approve_request(
+            self.submit(**request_overrides), self.coordinator
+        )
+        assignment = services.assign_request(approved, self.matching, self.coordinator)
+        return services.accept_assignment(assignment, self.matching)
+
+    def test_starting_moves_to_in_progress_and_stamps_the_time(self):
+        assignment = self.accepted(
+            scheduled_start=timezone.now() - timedelta(minutes=10)
+        )
+
+        started = services.start_work(assignment, self.matching)
+
+        self.assertEqual(started.status, ServiceRequest.Status.IN_PROGRESS)
+        self.assertIsNotNone(started.started_at)
+
+    def test_cannot_start_before_the_slot(self):
+        assignment = self.accepted(scheduled_start=timezone.now() + timedelta(days=2))
+
+        with self.assertRaises(services.OutsideServiceWindow):
+            services.start_work(assignment, self.matching)
+
+    def test_cannot_start_twice(self):
+        assignment = self.accepted(
+            scheduled_start=timezone.now() - timedelta(minutes=10)
+        )
+        services.start_work(assignment, self.matching)
+
+        with self.assertRaises(services.IllegalTransition):
+            services.start_work(assignment, self.matching)
+
+    def test_cannot_complete_work_that_was_never_started(self):
+        """FULFILLED is reachable only from IN_PROGRESS."""
+        assignment = self.accepted(
+            scheduled_start=timezone.now() - timedelta(minutes=10)
+        )
+
+        with self.assertRaises(services.IllegalTransition):
+            services.fulfil_request(assignment, self.matching)
+
+    def test_starting_through_the_view(self):
+        assignment = self.accepted(
+            scheduled_start=timezone.now() - timedelta(minutes=10)
+        )
+        self.client.force_login(self.matching)
+
+        response = self.client.post(
+            reverse("servicing:start_assignment", args=[assignment.pk]), follow=True
+        )
+
+        assignment.service_request.refresh_from_db()
+        self.assertEqual(
+            assignment.service_request.status, ServiceRequest.Status.IN_PROGRESS
+        )
+        self.assertContains(response, "Work started")
+
+
+class AssignmentVisibilityAdminTests(PersonnelFixtureMixin, ServicingTestCase):
+    """Coordinators must be able to SEE who holds a request, not just assign it.
+
+    Visibility is a pull question -- no notification answers "show me the queue
+    and who is on what".
+    """
+
+    def setUp(self):
+        self.client.force_login(self.coordinator)
+
+    def scheduled(self):
+        self.make_available(self.matching)
+        approved = services.approve_request(self.submit(), self.coordinator)
+        assignment = services.assign_request(
+            approved, self.matching, self.coordinator
+        )
+        return services.accept_assignment(assignment, self.matching)
+
+    def test_changelist_names_the_assignee(self):
+        self.scheduled()
+
+        response = self.client.get(
+            reverse("admin:servicing_servicerequest_changelist")
+        )
+
+        self.assertContains(response, "Assigned to")
+        self.assertContains(response, self.matching.email)
+
+    def test_unassigned_request_shows_a_dash(self):
+        self.submit()
+
+        response = self.client.get(
+            reverse("admin:servicing_servicerequest_changelist")
+        )
+
+        self.assertContains(response, "—")
+
+    def test_declined_attempts_are_not_shown_as_current(self):
+        """A declined assignment is history, not who holds it now."""
+        self.make_available(self.matching)
+        approved = services.approve_request(self.submit(), self.coordinator)
+        assignment = services.assign_request(
+            approved, self.matching, self.coordinator
+        )
+        services.decline_assignment(assignment, self.matching)
+
+        response = self.client.get(
+            reverse("admin:servicing_servicerequest_changelist")
+        )
+
+        self.assertContains(response, "—")
+
+    def test_coordinator_can_reach_the_assignment_list(self):
+        """Needs view_assignment, granted by accounts migration 0004."""
+        self.scheduled()
+
+        response = self.client.get(reverse("admin:servicing_assignment_changelist"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.matching.email)
+
+    def test_request_page_shows_the_full_attempt_history(self):
+        """Including who declined -- the inline, not just the live assignment."""
+        accepted = self.scheduled()
+
+        response = self.client.get(
+            reverse(
+                "admin:servicing_servicerequest_change",
+                args=[accepted.service_request_id],
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.matching.email)
+
+
+@override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
+class NotificationTests(PersonnelFixtureMixin, ServicingTestCase):
+    """Notifications fire after commit, to the right people (ADR-011 D2/D3).
+
+    CELERY_TASK_ALWAYS_EAGER runs tasks inline instead of needing a broker and
+    a worker in the test run. captureOnCommitCallbacks is the other half: a
+    TestCase wraps each test in a transaction that never commits, so
+    on_commit callbacks would otherwise NEVER run and every assertion here
+    would pass vacuously.
+    """
+
+    def setUp(self):
+        mail.outbox = []
+
+    def recipients(self):
+        return sorted(address for message in mail.outbox for address in message.to)
+
+    def approved(self):
+        return services.approve_request(self.submit(), self.coordinator)
+
+    def test_assigning_notifies_the_personnel(self):
+        self.make_available(self.matching)
+        approved = self.approved()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            services.assign_request(approved, self.matching, self.coordinator)
+
+        self.assertEqual(self.recipients(), [self.matching.email])
+        self.assertIn("offered a job", mail.outbox[0].subject)
+
+    def test_accepting_notifies_the_client(self):
+        self.make_available(self.matching)
+        assignment = services.assign_request(
+            self.approved(), self.matching, self.coordinator
+        )
+        mail.outbox = []
+
+        with self.captureOnCommitCallbacks(execute=True):
+            services.accept_assignment(assignment, self.matching)
+
+        self.assertEqual(self.recipients(), [self.client_user.email])
+
+    def test_starting_notifies_client_and_coordinator(self):
+        self.make_available(self.matching)
+        assignment = services.assign_request(
+            services.approve_request(
+                self.submit(scheduled_start=timezone.now() - timedelta(minutes=10)),
+                self.coordinator,
+            ),
+            self.matching,
+            self.coordinator,
+        )
+        # accept_assignment returns a fresh instance; the local one is stale.
+        assignment = services.accept_assignment(assignment, self.matching)
+        mail.outbox = []
+
+        with self.captureOnCommitCallbacks(execute=True):
+            services.start_work(assignment, self.matching)
+
+        self.assertEqual(
+            self.recipients(),
+            sorted([self.client_user.email, self.coordinator.email]),
+        )
+
+    def test_completing_notifies_client_and_coordinator(self):
+        self.make_available(self.matching)
+        assignment = services.assign_request(
+            services.approve_request(
+                self.submit(scheduled_start=timezone.now() - timedelta(minutes=10)),
+                self.coordinator,
+            ),
+            self.matching,
+            self.coordinator,
+        )
+        assignment = services.accept_assignment(assignment, self.matching)
+        services.start_work(assignment, self.matching)
+        mail.outbox = []
+
+        with self.captureOnCommitCallbacks(execute=True):
+            services.fulfil_request(assignment, self.matching)
+
+        self.assertEqual(
+            self.recipients(),
+            sorted([self.client_user.email, self.coordinator.email]),
+        )
+
+    def test_rejecting_notifies_the_client_with_the_reason(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            services.reject_request(
+                self.submit(), self.coordinator, "Out of catchment area"
+            )
+
+        self.assertEqual(self.recipients(), [self.client_user.email])
+        self.assertIn("Out of catchment area", mail.outbox[0].body)
+
+    def test_nothing_is_sent_when_the_transaction_rolls_back(self):
+        """The bug on_commit exists to prevent: telling a client about a
+        rejection that never happened."""
+        service_request = self.submit()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            with self.assertRaises(RuntimeError):
+                with transaction.atomic():
+                    services.reject_request(
+                        service_request, self.coordinator, "Out of catchment"
+                    )
+                    raise RuntimeError("something later blew up")
+
+        self.assertEqual(mail.outbox, [])
+        service_request.refresh_from_db()
+        self.assertEqual(service_request.status, ServiceRequest.Status.SUBMITTED)

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -122,6 +123,23 @@ LOGIN_URL = 'login'
 # Role-aware: a single static page would send personnel to the client list.
 LOGIN_REDIRECT_URL = 'home'
 LOGOUT_REDIRECT_URL = 'login'
+
+
+# Celery (ADR-008). Only external, retry-prone work goes on the queue --
+# notifications. The workflow itself is a state machine, not a queue.
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+# No result backend: nothing waits on these tasks, and storing results would be
+# a second piece of infrastructure for no reader.
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TIMEZONE = TIME_ZONE
+# Surfaces broker problems at startup rather than silently dropping tasks.
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# Notifications print to the console for now. ADR-011 leaves the real provider
+# open; swapping this line is the whole change.
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'BMH Service Hub <no-reply@bmh.example>'
 
 
 # Static files (CSS, JavaScript, Images)

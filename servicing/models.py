@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.core.validators import RegexValidator
 from django.db import models
@@ -60,6 +62,12 @@ class USState(models.TextChoices):
     WI = "WI", "Wisconsin"
     WY = "WY", "Wyoming"
 
+
+# How long after a slot ends personnel may still record it as done (ADR-011 D5,
+# grace period). Generous on purpose: someone finishing late in the day should
+# not be locked out of recording work they actually did, and a coordinator can
+# still see the request sitting unfulfilled in the meantime.
+FULFILMENT_GRACE = timedelta(hours=24)
 
 # 12345 or 12345-6789. Enforced on the model so it holds for every writer,
 # not only the client form.
@@ -127,6 +135,10 @@ class ServiceRequest(models.Model):
         REJECTED = "REJECTED", "Rejected"
         READY_FOR_ASSIGNMENT = "READY_FOR_ASSIGNMENT", "Ready for assignment"
         ASSIGNED = "ASSIGNED", "Assigned"
+        # Personnel accepted, but nobody has turned up yet. Accepting and
+        # commencing are different events: collapsing them told the client
+        # work was under way when it had only been agreed.
+        SCHEDULED = "SCHEDULED", "Scheduled"
         IN_PROGRESS = "IN_PROGRESS", "In progress"
         FULFILLED = "FULFILLED", "Fulfilled"
 
@@ -192,6 +204,9 @@ class ServiceRequest(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
 
+    # When work actually commenced -- set by start_work(), not by acceptance.
+    started_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -228,6 +243,20 @@ class ServiceRequest(models.Model):
             # A rejection must be explainable to the client, and nothing else may
             # carry a rejection reason. REJECTED is terminal, so a request can
             # never move out of it and leave a stale reason behind.
+            # started_at exists exactly for the states that follow commencement.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(status__in=["IN_PROGRESS", "FULFILLED"], started_at__isnull=False)
+                    | (
+                        ~models.Q(status__in=["IN_PROGRESS", "FULFILLED"])
+                        & models.Q(started_at__isnull=True)
+                    )
+                ),
+                name="servicerequest_started_at_matches_status",
+                violation_error_message=(
+                    "started_at must be set if and only if the work has commenced."
+                ),
+            ),
             models.CheckConstraint(
                 condition=(
                     (models.Q(status="REJECTED") & ~models.Q(rejection_reason=""))
@@ -247,6 +276,15 @@ class ServiceRequest(models.Model):
             f"{self.scheduled_start:%d %b %Y, %H:%M} "
             f"({self.get_status_display()})"
         )
+
+    @property
+    def service_window_opens_at(self):
+        """Work cannot start, or be recorded, before its slot."""
+        return self.scheduled_start
+
+    @property
+    def service_window_closes_at(self):
+        return self.scheduled_start + self.expected_duration + FULFILMENT_GRACE
 
     @property
     def location_display(self):

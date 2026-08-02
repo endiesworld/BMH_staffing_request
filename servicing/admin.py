@@ -1,4 +1,5 @@
 from django.contrib import admin, messages
+from django.db.models import Prefetch
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.template.response import TemplateResponse
 
@@ -30,6 +31,63 @@ class RequestTypeAdmin(admin.ModelAdmin):
         return self.prepopulated_fields if obj is None else {}
 
 
+# --- Assignments: who a request went to, and what they said ---
+
+LIVE_ASSIGNMENT_STATUSES = (Assignment.Status.PENDING, Assignment.Status.ACCEPTED)
+
+ASSIGNMENT_FIELDS = (
+    "personnel",
+    "status",
+    "assigned_by",
+    "created_at",
+    "responded_at",
+)
+
+
+class AssignmentInline(admin.TabularInline):
+    """The full attempt history on the request's own page, declines included.
+
+    Read-only: accepting and declining are the personnel's transitions, made
+    through servicing.services, never typed in here.
+    """
+
+    model = Assignment
+    extra = 0
+    can_delete = False
+    readonly_fields = ASSIGNMENT_FIELDS
+    fields = ASSIGNMENT_FIELDS
+
+    def has_add_permission(self, request, obj=None):
+        # Assigning goes through the changelist action, which enforces
+        # eligibility and moves the request's status with it.
+        return False
+
+
+class AssignmentAdmin(admin.ModelAdmin):
+    """Standalone view: every assignment across all requests."""
+
+    list_display = (
+        "service_request",
+        "personnel",
+        "status",
+        "assigned_by",
+        "created_at",
+        "responded_at",
+    )
+    list_filter = ("status",)
+    search_fields = ("personnel__email", "service_request__city")
+    date_hierarchy = "created_at"
+
+    def get_readonly_fields(self, request, obj=None):
+        return [field.name for field in self.model._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 # --- Service requests: a read-only record, changed only through transitions ---
 
 class ServiceRequestAdmin(admin.ModelAdmin):
@@ -47,6 +105,7 @@ class ServiceRequestAdmin(admin.ModelAdmin):
         "scheduled_start",
         "location_display",
         "status",
+        "assigned_to",
         "reviewed_by",
     )
     list_filter = ("status", "request_type")
@@ -54,6 +113,40 @@ class ServiceRequestAdmin(admin.ModelAdmin):
     date_hierarchy = "scheduled_start"
     ordering = ("-created_at",)
     actions = ("approve_requests", "assign_personnel")
+    inlines = (AssignmentInline,)
+
+    def get_queryset(self, request):
+        # Prefetched so the assigned_to column costs one extra query for the
+        # whole page rather than one per row.
+        return (
+            super()
+            .get_queryset(request)
+            .select_related("client", "request_type", "reviewed_by")
+            .prefetch_related(
+                Prefetch(
+                    "assignments",
+                    queryset=Assignment.objects.select_related("personnel"),
+                )
+            )
+        )
+
+    @admin.display(description="Assigned to")
+    def assigned_to(self, obj):
+        """Who currently holds this request, if anyone.
+
+        Filtered in Python rather than with another query, so it uses the rows
+        already prefetched above.
+        """
+        live = [
+            assignment
+            for assignment in obj.assignments.all()
+            if assignment.status in LIVE_ASSIGNMENT_STATUSES
+        ]
+        if not live:
+            return "—"
+
+        assignment = live[0]
+        return f"{assignment.personnel.email} ({assignment.get_status_display()})"
 
     def get_readonly_fields(self, request, obj=None):
         return [field.name for field in self.model._meta.fields]
@@ -172,5 +265,6 @@ class ServiceRequestAdmin(admin.ModelAdmin):
         )
 
 
+admin.site.register(Assignment, AssignmentAdmin)
 admin.site.register(RequestType, RequestTypeAdmin)
 admin.site.register(ServiceRequest, ServiceRequestAdmin)

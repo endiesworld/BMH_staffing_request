@@ -6,6 +6,7 @@ from django.utils import timezone
 from accounts.models import User
 from .models import Assignment, RequestType, ServiceRequest
 from .recommendation import recommend_personnel
+from . import tasks
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,9 @@ TRANSITIONS = {
     Status.SUBMITTED: {Status.REJECTED, Status.READY_FOR_ASSIGNMENT},
     Status.READY_FOR_ASSIGNMENT: {Status.ASSIGNED},
     # A declining personnel member returns the request to the assignable pool.
-    Status.ASSIGNED: {Status.IN_PROGRESS, Status.READY_FOR_ASSIGNMENT},
+    Status.ASSIGNED: {Status.SCHEDULED, Status.READY_FOR_ASSIGNMENT},
+    # Accepted and booked in, but nobody has commenced yet.
+    Status.SCHEDULED: {Status.IN_PROGRESS},
     Status.IN_PROGRESS: {Status.FULFILLED},
     Status.REJECTED: set(),
     Status.FULFILLED: set(),
@@ -156,7 +159,7 @@ def reject_request(service_request: ServiceRequest, coordinator: User, rejection
         raise ValueError("A rejection must include a reason.")
 
     with transaction.atomic():
-        return _transition(
+        rejected = _transition(
             service_request,
             Status.REJECTED,
             actor=coordinator,
@@ -164,6 +167,9 @@ def reject_request(service_request: ServiceRequest, coordinator: User, rejection
             reviewed_at=timezone.now(),
             rejection_reason=rejection_reason,
         )
+        _notify_after_commit(tasks.notify_client_of_rejection, rejected.pk)
+
+    return rejected
 
 
 def assign_request(service_request: ServiceRequest, personnel: User, coordinator: User):
@@ -196,8 +202,41 @@ def assign_request(service_request: ServiceRequest, personnel: User, coordinator
             personnel=personnel,
             assigned_by=coordinator,
         )
+        _notify_after_commit(
+            tasks.notify_personnel_of_assignment, assignment.pk
+        )
 
     return assignment
+
+
+class OutsideServiceWindow(ValueError):
+    """Right state, wrong time -- a third failure mode alongside
+    IllegalTransition (wrong state) and plain ValueError (bad argument).
+
+    Subclasses ValueError deliberately, so callers that only catch ValueError
+    keep working while callers that want the window can catch this and show
+    the actual times.
+    """
+
+    def __init__(self, message, opens_at, closes_at):
+        self.opens_at = opens_at
+        self.closes_at = closes_at
+        super().__init__(message)
+
+
+def _notify_after_commit(task, *args):
+    """Queue a notification only once the transaction has actually committed.
+
+    NOT task.delay() inline. Enqueuing inside the transaction gives you one of
+    two classic bugs: a worker picks the task up before the commit lands and
+    reads a row that does not exist yet, or the transaction rolls back and the
+    client has already been told about something that never happened
+    (ADR-011 D3).
+
+    The audit write is the opposite -- it belongs INSIDE, so history and status
+    commit together. Same seam, deliberately different moments.
+    """
+    transaction.on_commit(lambda: task.delay(*args))
 
 
 def _transition_assignment(assignment: Assignment, to_status: str):
@@ -229,12 +268,17 @@ def _guard_owner(assignment: Assignment, personnel: User):
 
 
 def accept_assignment(assignment: Assignment, personnel: User):
-    """Personnel accepts: the work is now theirs and the request is under way."""
+    """Personnel accepts: the work is theirs and the slot is booked in."""
     _guard_owner(assignment, personnel)
 
     with transaction.atomic():
         accepted = _transition_assignment(assignment, AssignmentStatus.ACCEPTED)
-        _transition(accepted.service_request, Status.IN_PROGRESS, actor=personnel)
+        # SCHEDULED, not IN_PROGRESS: they have agreed to do it, they have not
+        # started it. The client must not be told work is under way yet.
+        scheduled = _transition(
+            accepted.service_request, Status.SCHEDULED, actor=personnel
+        )
+        _notify_after_commit(tasks.notify_client_of_acceptance, scheduled.pk)
 
     return accepted
 
@@ -254,3 +298,84 @@ def decline_assignment(assignment: Assignment, personnel: User):
         )
 
     return declined
+
+
+def _guard_service_window(service_request: ServiceRequest, too_early: str, too_late: str):
+    """Both commencing and completing must happen inside the booked slot.
+
+    A transition guard rather than a CheckConstraint: it depends on now() and
+    on the prior state, neither of which a constraint can see (ADR-010 D3).
+    """
+    now = timezone.now()
+
+    if now < service_request.service_window_opens_at:
+        raise OutsideServiceWindow(
+            too_early,
+            service_request.service_window_opens_at,
+            service_request.service_window_closes_at,
+        )
+
+    if now > service_request.service_window_closes_at:
+        raise OutsideServiceWindow(
+            too_late,
+            service_request.service_window_opens_at,
+            service_request.service_window_closes_at,
+        )
+
+
+def start_work(assignment: Assignment, personnel: User):
+    """Personnel commences the work they accepted.
+
+    The transition the model was missing: accepting books the slot, starting is
+    what actually puts the request in progress.
+    """
+    _guard_owner(assignment, personnel)
+
+    if assignment.status != AssignmentStatus.ACCEPTED:
+        raise ValueError("You can only start work you accepted.")
+
+    service_request = assignment.service_request
+    _guard_service_window(
+        service_request,
+        too_early="This work is not due to start yet.",
+        too_late="The window for this work has closed. Contact the coordinator.",
+    )
+
+    with transaction.atomic():
+        started = _transition(
+            service_request,
+            Status.IN_PROGRESS,
+            actor=personnel,
+            started_at=timezone.now(),
+        )
+        _notify_after_commit(tasks.notify_work_started, started.pk)
+
+    return started
+
+
+def fulfil_request(assignment: Assignment, personnel: User):
+    """The assigned personnel records the work as done (ADR-011 D4).
+
+    Requires the work to have been started -- the transition map allows
+    FULFILLED only from IN_PROGRESS, so completing something never commenced
+    is refused as an IllegalTransition.
+    """
+    _guard_owner(assignment, personnel)
+
+    if assignment.status != AssignmentStatus.ACCEPTED:
+        raise ValueError("You can only complete work you accepted.")
+
+    service_request = assignment.service_request
+    _guard_service_window(
+        service_request,
+        too_early="This work is not due to start yet, so it cannot be marked complete.",
+        too_late=(
+            "The window for recording this work has closed. Contact the coordinator."
+        ),
+    )
+
+    with transaction.atomic():
+        fulfilled = _transition(service_request, Status.FULFILLED, actor=personnel)
+        _notify_after_commit(tasks.notify_work_completed, fulfilled.pk)
+
+    return fulfilled

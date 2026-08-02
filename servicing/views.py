@@ -164,3 +164,27 @@ def decline_assignment(request, pk):
         services.decline_assignment,
         "Declined. The request has gone back to the coordinator to reassign.",
     )
+
+
+@require_POST
+@login_required
+@personnel_only
+def start_assignment(request, pk):
+    return _respond(
+        request,
+        pk,
+        services.start_work,
+        "Work started. The client can see it is under way.",
+    )
+
+
+@require_POST
+@login_required
+@personnel_only
+def fulfil_assignment(request, pk):
+    return _respond(
+        request,
+        pk,
+        services.fulfil_request,
+        "Marked complete. Thank you.",
+    )

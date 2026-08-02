@@ -22,4 +22,14 @@ urlpatterns = [
         views.decline_assignment,
         name="decline_assignment",
     ),
+    path(
+        "assignments/<int:pk>/start/",
+        views.start_assignment,
+        name="start_assignment",
+    ),
+    path(
+        "assignments/<int:pk>/complete/",
+        views.fulfil_assignment,
+        name="fulfil_assignment",
+    ),
 ]

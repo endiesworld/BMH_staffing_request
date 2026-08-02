@@ -51,10 +51,43 @@
               <button type="submit" class="btn secondary">Decline</button>
             </form>
           </div>
+        {% elif assignment.status == "ACCEPTED" %}
+          <p class="muted" style="margin:0.9rem 0 0; font-size:0.9rem;">
+            You accepted this on {{ assignment.responded_at|date:"j M Y, H:i" }}.
+          </p>
+
+          {% if sr.status == "SCHEDULED" %}
+            <div style="margin-top:0.9rem;">
+              <form method="post"
+                    action="{% url 'servicing:start_assignment' assignment.pk %}">
+                {% csrf_token %}
+                <button type="submit" class="btn">Start work</button>
+              </form>
+              <p class="muted" style="font-size:0.85rem; margin:0.5rem 0 0;">
+                Can be started between
+                {{ sr.service_window_opens_at|date:"j M Y, H:i" }} and
+                {{ sr.service_window_closes_at|date:"j M Y, H:i" }}.
+              </p>
+            </div>
+          {% elif sr.status == "IN_PROGRESS" %}
+            <div style="margin-top:0.9rem;">
+              <form method="post"
+                    action="{% url 'servicing:fulfil_assignment' assignment.pk %}">
+                {% csrf_token %}
+                <button type="submit" class="btn">Mark complete</button>
+              </form>
+              <p class="muted" style="font-size:0.85rem; margin:0.5rem 0 0;">
+                Started {{ sr.started_at|date:"j M Y, H:i" }}.
+              </p>
+            </div>
+          {% elif sr.status == "FULFILLED" %}
+            <p class="muted" style="margin:0.5rem 0 0; font-size:0.9rem;">
+              Completed.
+            </p>
+          {% endif %}
         {% else %}
           <p class="muted" style="margin:0.9rem 0 0; font-size:0.9rem;">
-            You {{ assignment.get_status_display|lower }} this on
-            {{ assignment.responded_at|date:"j M Y, H:i" }}.
+            You declined this on {{ assignment.responded_at|date:"j M Y, H:i" }}.
           </p>
         {% endif %}
       </div>
