@@ -4,6 +4,7 @@ from unittest.mock import patch
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from accounts import services as account_services
@@ -316,3 +317,61 @@ class RejectionReasonConstraintTests(ServicingTestCase):
         )
 
         self.assertEqual(service_request.rejection_reason, "   ")
+
+
+class ApproveActionAdminTests(ServicingTestCase):
+    """The admin action, driven the way a coordinator's browser drives it.
+
+    Covers what `manage.py check` cannot: attribute access inside the action
+    body, which only fails at runtime.
+    """
+
+    def setUp(self):
+        self.url = reverse("admin:servicing_servicerequest_changelist")
+        self.client.force_login(self.coordinator)
+
+    def approve(self, *service_requests):
+        return self.client.post(
+            self.url,
+            {
+                "action": "approve_requests",
+                "_selected_action": [str(sr.pk) for sr in service_requests],
+                "index": "0",
+            },
+            follow=True,
+        )
+
+    def test_coordinator_can_reach_the_changelist(self):
+        """Group permissions, not the role field, are what open this page."""
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_action_approves_and_records_the_coordinator(self):
+        service_request = self.submit()
+
+        response = self.approve(service_request)
+
+        service_request.refresh_from_db()
+        self.assertEqual(
+            service_request.status, ServiceRequest.Status.READY_FOR_ASSIGNMENT
+        )
+        self.assertEqual(service_request.reviewed_by, self.coordinator)
+        self.assertContains(response, "1 request(s) approved")
+
+    def test_illegal_transition_warns_instead_of_crashing(self):
+        """The branch that referenced a removed field and blew up at runtime."""
+        service_request = services.approve_request(self.submit(), self.coordinator)
+
+        response = self.approve(service_request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cannot move a request from")
+
+    def test_requests_cannot_be_added_through_the_admin(self):
+        """Creation belongs to submit_request(), not an admin form."""
+        response = self.client.get(
+            reverse("admin:servicing_servicerequest_add"), follow=True
+        )
+
+        self.assertEqual(response.status_code, 403)

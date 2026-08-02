@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Availability — BMH Service Hub{% endblock %}
+
+{% block content %}
+  <h1>Your availability</h1>
+
+  <div class="card" style="max-width: 520px;">
+    <p class="muted" style="margin-top:0;">
+      Sector: <strong>{{ profile.get_sector_display }}</strong>.
+      You can only be assigned requests that need this sector.
+    </p>
+
+    {% if profile.availability_status == "AVAILABLE" %}
+      <div class="msg success">
+        You are available, so coordinators can assign you work.
+      </div>
+    {% else %}
+      <div class="msg warning">
+        You are not available, so you will not appear when a coordinator
+        looks for someone to assign.
+      </div>
+    {% endif %}
+
+    <form method="post">
+      {% csrf_token %}
+      {% for field in form %}
+        <div class="field">
+          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+        </div>
+      {% endfor %}
+      <button type="submit" class="btn">Update availability</button>
+    </form>
+  </div>
+{% endblock %}

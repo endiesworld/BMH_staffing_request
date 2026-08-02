@@ -1,7 +1,7 @@
 from django import forms
 from django.contrib.auth.forms import UserCreationForm
 
-from .models import User
+from .models import PersonnelProfile, User
 from .validators import normalize_us_phone
 
 
@@ -55,3 +55,45 @@ class ClientRegistrationForm(UserCreationForm):
             "Use accounts.services.create_client() with this form's cleaned_data "
             "instead of ClientRegistrationForm.save()."
         )
+
+
+class PersonnelRegistrationForm(UserCreationForm):
+    """Self-registration for personnel (ADR-009: personnel self-register).
+
+    Sector is collected here because it is what makes someone eligible for a
+    request: eligibility matches PersonnelProfile.sector against
+    RequestType.required_sector.
+
+    Availability is deliberately NOT collected. It defaults to UNAVAILABLE
+    (ADR-009 D3), so a newly registered person is not assignable until they
+    opt in -- registering is not the same as being ready to work.
+    """
+
+    sector = forms.ChoiceField(
+        choices=PersonnelProfile.SectorCategory.choices,
+        label="Which sector do you work in?",
+        help_text="This decides which kinds of request you can be assigned.",
+    )
+
+    class Meta(UserCreationForm.Meta):
+        model = User
+        fields = ("email",)
+
+    field_order = ("email", "sector", "password1", "password2")
+
+    def save(self, commit=True):
+        # Would create the User alone, leaving personnel with no
+        # PersonnelProfile -- the ADR-009 invariant create_personnel() owns.
+        raise NotImplementedError(
+            "Use accounts.services.create_personnel() with this form's "
+            "cleaned_data instead of PersonnelRegistrationForm.save()."
+        )
+
+
+class AvailabilityForm(forms.ModelForm):
+    """The opt-in that makes a personnel member assignable."""
+
+    class Meta:
+        model = PersonnelProfile
+        fields = ("availability_status",)
+        labels = {"availability_status": "Your current availability"}

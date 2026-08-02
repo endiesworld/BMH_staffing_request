@@ -80,7 +80,17 @@
       <span class="brand">BMH Service Hub</span>
       <nav>
         {% if user.is_authenticated %}
-          <a href="{% url 'servicing:my_requests' %}">My requests</a>
+          {% comment %}
+            Role decides which experience you get; permissions decide what the
+            admin lets you touch. These are the client/personnel entry points.
+          {% endcomment %}
+          {% if user.role == "CLIENT" %}
+            <a href="{% url 'servicing:my_requests' %}">My requests</a>
+          {% elif user.role == "PERSONNEL" %}
+            <a href="{% url 'accounts:availability' %}">Availability</a>
+          {% elif user.role == "COORDINATOR" %}
+            <a href="/admin/servicing/servicerequest/">Review queue</a>
+          {% endif %}
           <span class="muted">{{ user.email }}</span>
           <form method="post" action="{% url 'logout' %}">
             {% csrf_token %}

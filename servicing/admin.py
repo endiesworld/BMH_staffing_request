@@ -80,7 +80,7 @@ class ServiceRequestAdmin(admin.ModelAdmin):
             except services.IllegalTransition as exc:
                 self.message_user(
                     request,
-                    f"{service_request.title}: {exc}",
+                    f"{service_request}: {exc}",
                     level=messages.WARNING,
                 )
             else:

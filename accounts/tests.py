@@ -231,3 +231,96 @@ class RegisterClientViewTests(TestCase):
         response = self.client.get(self.URL)
 
         self.assertRedirects(response, reverse("servicing:my_requests"))
+
+
+class RegisterPersonnelViewTests(TestCase):
+    URL = reverse("accounts:register_personnel")
+    VALID = {
+        "email": "nurse@example.com",
+        "sector": PersonnelProfile.SectorCategory.HEALTHCARE,
+        "password1": "correct-horse-battery",
+        "password2": "correct-horse-battery",
+    }
+
+    def test_registration_creates_personnel_unavailable_by_default(self):
+        """Registering is not the same as being ready to work (ADR-009 D3).
+
+        A new personnel must NOT be assignable until they opt in, or a
+        coordinator could assign work to someone who never said they were free.
+        """
+        response = self.client.post(self.URL, self.VALID)
+
+        self.assertRedirects(response, reverse("accounts:availability"))
+
+        user = User.objects.get(email="nurse@example.com")
+        self.assertEqual(user.role, User.Role.PERSONNEL)
+        self.assertFalse(user.is_staff)
+        self.assertEqual(
+            user.personnel_profile.sector,
+            PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+        self.assertEqual(
+            user.personnel_profile.availability_status,
+            PersonnelProfile.AvailabilityStatus.UNAVAILABLE,
+        )
+
+    def test_availability_cannot_be_set_during_registration(self):
+        """The field is not on the form, so a crafted POST cannot reach it."""
+        self.client.post(
+            self.URL,
+            {**self.VALID, "availability_status": "AVAILABLE"},
+        )
+
+        user = User.objects.get(email="nurse@example.com")
+        self.assertEqual(
+            user.personnel_profile.availability_status,
+            PersonnelProfile.AvailabilityStatus.UNAVAILABLE,
+        )
+
+
+class AvailabilityViewTests(TestCase):
+    URL = reverse("accounts:availability")
+
+    def setUp(self):
+        self.personnel = services.create_personnel(
+            email="nurse@example.com",
+            password="s3cret-pass",
+            sector=PersonnelProfile.SectorCategory.HEALTHCARE,
+        )
+
+    def test_personnel_can_opt_in(self):
+        self.client.force_login(self.personnel)
+
+        response = self.client.post(
+            self.URL,
+            {"availability_status": PersonnelProfile.AvailabilityStatus.AVAILABLE},
+            follow=True,
+        )
+
+        self.personnel.personnel_profile.refresh_from_db()
+        self.assertEqual(
+            self.personnel.personnel_profile.availability_status,
+            PersonnelProfile.AvailabilityStatus.AVAILABLE,
+        )
+        self.assertContains(response, "Availability updated")
+
+    def test_clients_cannot_reach_the_availability_page(self):
+        """role_required: a client has no availability to set."""
+        client_user = services.create_client(
+            email="client@example.com",
+            password="s3cret-pass",
+            organization_name="Acme",
+            phone_number="+15550000000",
+        )
+        self.client.force_login(client_user)
+
+        response = self.client.get(self.URL)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_anonymous_visitors_are_redirected_to_login(self):
+        """@login_required runs before @role_required, so no AttributeError."""
+        response = self.client.get(self.URL)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response.url)
