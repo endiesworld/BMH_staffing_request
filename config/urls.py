@@ -22,6 +22,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     # Django's built-in auth views: login, logout, password change/reset.
     # Gives us the url names 'login' and 'logout' that base.html references.
+    # Ours first: both mount under accounts/, and the first match wins.
+    path('accounts/', include('accounts.urls')),
     path('accounts/', include('django.contrib.auth.urls')),
     path('requests/', include('servicing.urls')),
     # Landing on the site drops a client straight into their own requests

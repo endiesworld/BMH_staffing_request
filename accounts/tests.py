@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from django.test import TestCase
+from django.urls import reverse
 
 from accounts import services
 from accounts.models import ClientProfile, CoordinatorProfile, PersonnelProfile, User
@@ -138,3 +139,95 @@ class CreateCoordinatorTests(TestCase):
 
         # The user must NOT survive a failed profile step.
         self.assertEqual(User.objects.count(), 0)
+
+
+class RegisterClientViewTests(TestCase):
+    """Self-registration through the real stack: middleware, session, CSRF."""
+
+    URL = reverse("accounts:register_client")
+    VALID = {
+        "email": "newclient@example.com",
+        "organization_name": "Acme Care Services",
+        "phone_number": "(555) 123-4567",
+        "password1": "correct-horse-battery",
+        "password2": "correct-horse-battery",
+    }
+
+    def test_get_renders_the_form(self):
+        response = self.client.get(self.URL)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Create a client account")
+
+    def test_registration_creates_user_and_profile_and_logs_them_in(self):
+        """One post produces a complete client, signed in and ready to work."""
+        response = self.client.post(self.URL, self.VALID)
+
+        self.assertRedirects(response, reverse("servicing:my_requests"))
+
+        user = User.objects.get(email="newclient@example.com")
+        self.assertEqual(user.role, User.Role.CLIENT)
+        # Clients never reach the admin (contrast with create_coordinator).
+        self.assertFalse(user.is_staff)
+        self.assertTrue(user.check_password("correct-horse-battery"))
+
+        # The profile half of the ADR-009 invariant.
+        self.assertEqual(user.client_profile.organization_name, "Acme Care Services")
+        # Normalised on the way in, shared with servicing's contact_phone.
+        self.assertEqual(user.client_profile.phone_number, "+15551234567")
+
+        # Logged in, not merely created.
+        self.assertEqual(
+            int(self.client.session["_auth_user_id"]), user.pk
+        )
+
+    def test_duplicate_email_is_refused_and_writes_nothing(self):
+        services.create_client(
+            email="newclient@example.com",
+            password="s3cret-pass",
+            organization_name="Existing",
+            phone_number="+15550000000",
+        )
+
+        response = self.client.post(self.URL, self.VALID)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(User.objects.filter(email="newclient@example.com").count(), 1)
+        self.assertEqual(ClientProfile.objects.count(), 1)
+
+    def test_mismatched_passwords_are_refused(self):
+        response = self.client.post(
+            self.URL, {**self.VALID, "password2": "something-else"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_weak_password_is_refused(self):
+        """AUTH_PASSWORD_VALIDATORS come free with UserCreationForm."""
+        response = self.client.post(
+            self.URL, {**self.VALID, "password1": "12345678", "password2": "12345678"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_bad_phone_number_is_refused(self):
+        response = self.client.post(self.URL, {**self.VALID, "phone_number": "555 12"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "10-digit US phone number")
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_already_signed_in_users_are_sent_away(self):
+        user = services.create_client(
+            email="existing@example.com",
+            password="s3cret-pass",
+            organization_name="Existing",
+            phone_number="+15550000000",
+        )
+        self.client.force_login(user)
+
+        response = self.client.get(self.URL)
+
+        self.assertRedirects(response, reverse("servicing:my_requests"))

@@ -46,9 +46,17 @@
     }
     .btn.secondary { background: transparent; color: var(--accent); }
     label { display: block; font-weight: 550; margin: 0 0 0.3rem; }
-    input[type=text], textarea, select {
+    /* Every text-like input, not just type=text: the forms also render email,
+       password, tel and datetime-local, which would otherwise fall back to
+       unstyled browser defaults next to their styled neighbours. */
+    input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=submit]):not([type=button]),
+    textarea, select {
       width: 100%; padding: 0.6rem 0.7rem; font: inherit;
       border: 1px solid var(--line); border-radius: 8px; background: #fff;
+      color: inherit;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent);
     }
     .field { margin-bottom: 1.1rem; }
     .errors { color: #b3261e; font-size: 0.9rem; margin: 0.3rem 0 0; padding-left: 1.1rem; }

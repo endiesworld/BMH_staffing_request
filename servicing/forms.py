@@ -3,6 +3,8 @@ from datetime import timedelta
 from django import forms
 from django.utils import timezone
 
+from accounts.validators import normalize_us_phone
+
 from .models import RequestType, ServiceRequest
 
 # Offered as a dropdown rather than a raw DurationField: Django's duration
@@ -132,19 +134,13 @@ class ServiceRequestForm(forms.ModelForm):
     def clean_contact_phone(self):
         """Accept whatever the client types; store one canonical shape.
 
-        (555) 123-4567, 555-123-4567 and 15551234567 all become +15551234567,
-        so the stored value is comparable and the model validator can be strict.
+        Shared with client registration so the system only ever holds one phone
+        format. servicing -> accounts is the allowed direction (ADR-007).
         """
-        raw = self.cleaned_data["contact_phone"]
-        digits = "".join(character for character in raw if character.isdigit())
-
-        if len(digits) == 11 and digits.startswith("1"):
-            digits = digits[1:]
-        if len(digits) != 10:
-            raise forms.ValidationError(
-                "Enter a 10-digit US phone number, e.g. (555) 123-4567."
-            )
-        return f"+1{digits}"
+        try:
+            return normalize_us_phone(self.cleaned_data["contact_phone"])
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
 
     def clean_scheduled_start(self):
         scheduled_start = self.cleaned_data["scheduled_start"]

@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Log in — BMH Service Hub{% endblock %}
+{% block title %}Create an account — BMH Service Hub{% endblock %}
 
 {% block content %}
-  <h1>Log in</h1>
+  <h1>Create a client account</h1>
 
-  <div class="card" style="max-width: 420px;">
-    <form method="post">
+  <div class="card" style="max-width: 520px;">
+    <form method="post" novalidate>
       {% csrf_token %}
 
       {% if form.non_field_errors %}
@@ -19,6 +19,11 @@
         <div class="field">
           <label for="{{ field.id_for_label }}">{{ field.label }}</label>
           {{ field }}
+          {% if field.help_text %}
+            <div class="muted" style="font-size:0.85rem; margin-top:0.3rem;">
+              {{ field.help_text|safe }}
+            </div>
+          {% endif %}
           {% if field.errors %}
             <ul class="errors">
               {% for error in field.errors %}<li>{{ error }}</li>{% endfor %}
@@ -27,14 +32,11 @@
         </div>
       {% endfor %}
 
-      {# Carries ?next=... through, so @login_required returns you where you were. #}
-      <input type="hidden" name="next" value="{{ next }}">
-      <button type="submit" class="btn">Log in</button>
+      <button type="submit" class="btn">Create account</button>
     </form>
 
     <p class="muted" style="margin-bottom:0;">
-      New here?
-      <a href="{% url 'accounts:register_client' %}">Create a client account</a>.
+      Already have an account? <a href="{% url 'login' %}">Log in</a>.
     </p>
   </div>
 {% endblock %}
