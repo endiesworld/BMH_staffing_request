@@ -17,8 +17,23 @@ env:
   # CI is not a deployment. This key signs nothing that outlives the job -- but
   # settings REQUIRE it (ADR-004: no default, by design), so the app cannot
   # even import without one.
-  SECRET_KEY: ci-only-not-a-real-secret
+  SECRET_KEY: ci-only-not-a-real-secret-hJ39fQ2xL7vB0zR5tN8wY4mK6pD1sG-aUeC
   DATABASE_URL: postgres://bmh:bmh@127.0.0.1:5432/bmh_ci
+
+  # Tests run the way a developer runs them -- over plain http, via the Django
+  # test client. This is NOT incidental:
+  #
+  # DEBUG defaults to False (deliberately -- a forgotten variable must not
+  # expose a production app), and DEBUG=False switches on SECURE_SSL_REDIRECT.
+  # SecurityMiddleware then answers 301 to every test-client request before the
+  # view ever runs, and the suite collapses -- 24 failures, 6 errors, all of
+  # them `301 != 200`. It passes locally only because .env sets DEBUG=True.
+  #
+  # The DEBUG=False path is not left untested; it is covered where it belongs:
+  #   * `check --deploy` below asserts the production security posture
+  #   * `collectstatic` below runs under manifest storage, which is strict
+  #   * the `image` job boots the real container with DEBUG=False and probes it
+  DEBUG: "True"
 
 jobs:
   test:
@@ -133,7 +148,7 @@ jobs:
         # which is exactly the state a pod starts in.
         run: |
           docker run -d --name smoke -p 8000:8000 \
-            -e SECRET_KEY=ci-only-not-a-real-secret \
+            -e SECRET_KEY="$SECRET_KEY" \
             -e DEBUG=False \
             -e ALLOWED_HOSTS=localhost,127.0.0.1 \
             bmh-service-hub:ci

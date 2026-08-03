@@ -282,12 +282,30 @@ concurrency. CI always uses Postgres for this reason.
 | **Tests (Postgres)** | `uv sync --frozen` · missing-migration check · migrate · full suite · `check --deploy` · `collectstatic` with `DEBUG=False` |
 | **Container image builds** | builds the Dockerfile, then smoke-tests it: liveness 200 and readiness 503 with **no database**, and a non-root uid |
 
-Two details worth knowing:
+Three details worth knowing:
 
 - **CI runs against real Postgres**, for the `select_for_update()` reason above.
 - **`collectstatic` runs with `DEBUG=False`**, which selects the manifest storage backend. That
   backend raises on any `{% static %}` path that does not resolve — so a typo'd asset reference
   fails the build rather than a user's page.
+- **The test step sets `DEBUG=True`.** Not laziness: `DEBUG` defaults to `False`, and
+  `DEBUG=False` switches on `SECURE_SSL_REDIRECT`, so `SecurityMiddleware` answers **301 to every
+  test-client request** before the view runs. The suite collapses with ~30 `301 != 200` failures.
+  The `DEBUG=False` path is covered instead by `check --deploy`, `collectstatic`, and the image
+  job's container smoke test.
+
+#### Reproducing a CI failure locally
+
+Your `.env` makes local runs diverge from CI — it sets `DEBUG=True` and CI has no `.env` at all.
+That difference has already caused one green-locally / red-in-CI failure. To run the suite the way
+CI does, hide the local state:
+
+```bash
+mv .env /tmp/env.bak && mv staticfiles /tmp/sf.bak
+SECRET_KEY=x DATABASE_URL=postgres://bmh:bmh@127.0.0.1:5432/bmh DEBUG=True \
+  uv run manage.py test
+mv /tmp/env.bak .env && rm -rf /tmp/sf.bak
+```
 
 ---
 
