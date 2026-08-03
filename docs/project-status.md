@@ -98,7 +98,7 @@ Rule for splitting apps: **coupling/cohesion, not category.**
 
 ## 5. What's built
 
-**91 tests passing.** `manage.py check` clean, no model/migration drift.
+**99 tests passing.** `manage.py check` clean, no model/migration drift.
 
 ### `accounts` — ADR-006, ADR-009, ADR-013
 - `User(AbstractUser)`: email is the login, nested `Role` enum, custom `UserManager`.
@@ -129,8 +129,28 @@ Rule for splitting apps: **coupling/cohesion, not category.**
   decline, start, complete.
 - **Admin** — read-only requests with Approve + two-step Assign actions, `Assigned to` column,
   assignment history inline, standalone Assignment list.
-- **Notifications** (`tasks.py`) — 5 Celery tasks, queued via `transaction.on_commit`.
+- **Notifications** (`tasks.py`) — 5 Celery tasks on a Redis broker, queued via
+  `transaction.on_commit`, retry with backoff, tasks take IDs not instances.
+  Notified: personnel on assignment; client on acceptance; client **and coordinator** on start and
+  completion; client on rejection.
 - Migrations `0001`–`0007`.
+
+### Scheduling rules (ADR-011 D5) — settled after several passes, so read this before changing it
+- The client **picks** a slot. Validity is **"from now onwards"**, compared against the start of the
+  **current minute** — `datetime-local` has minute precision, so comparing to the exact instant
+  rejects the client's own "now".
+- The form **prefills now + 5 minutes**, which is valid and immediately workable.
+- The service window has grace at **both** edges: **15 min early** (people arrive early; also makes
+  the workflow demonstrable without waiting) and **24 h late**. Both edges govern **starting and
+  completing alike**.
+- **`TIME_ZONE = America/New_York`** (env-overridable). This is not cosmetic: a `datetime-local`
+  input submits naive wall-clock time, and with `TIME_ZONE='UTC'` every booking silently shifted
+  four hours into the past and was refused. `USE_TZ` stays `True` — storage is UTC.
+
+### Styling
+Single warm theme (butter ground `#fbf6e9`, sage accent `#38795a`), **no dark mode** — deliberately
+removed. All CSS is inline in `templates/base.html` because `STATICFILES_DIRS`/WhiteNoise are not
+configured yet; move it to `static/css/app.css` as part of the deployment work.
 
 ### Project
 - `config/views.py:home` — role-aware landing, also `LOGIN_REDIRECT_URL`.
@@ -164,11 +184,80 @@ Rule for splitting apps: **coupling/cohesion, not category.**
 - Notifications print to the console. Provider still open (ADR-011 D2).
 
 ## 7. Recommended next step
-**Settings/env hygiene (ADR-004)** — it is the only thing standing between this and a safe deploy,
-and it is self-contained. After that, either the **`audit` app** (closes the one deliberate seam in
-the codebase) or the **double-booking rule** (smallest real domain gap).
+**Deployment Phase 0** — see §8. It begins with settings/env hygiene (ADR-004), which was already
+the top item and is now also the first thing the cluster needs. Feature work (`audit` app,
+double-booking rule) is deliberately paused behind it.
 
-## 8. Key files
+## 8. Deployment plan (ADR-005 finally in motion) — NEXT UP
+
+### The homelab is not an empty cluster
+`kubectl get ns` shows an established platform. **Use it rather than inventing parallel machinery:**
+
+| Namespace | Consequence for us |
+|---|---|
+| `cnpg-system` | **CloudNativePG** — Postgres is a `Cluster` CR, **not** a hand-rolled StatefulSet |
+| `flux-system` | **Flux** — GitOps. No `kubectl apply` from CI, no Argo |
+| `cloudflared` | Tunnel **already running** — no ingress/port-forward/public IP needed |
+| `longhorn-system` | StorageClass is `longhorn` |
+| `traefik`, `metallb-system`, `cert-manager` | ingress / LB IPs / TLS already solved |
+| `cilium-secrets` | Cilium CNI — NetworkPolicy available |
+| `renovate` | image tags presumably bumped in git by Renovate |
+| `linkding` | **an existing app — copy its manifest pattern** |
+
+**Decided:** cluster is kubeadm/vanilla · images to **GHCR** · Postgres **in-cluster via CNPG**.
+
+### Phases
+```
+Phase 0  app-side readiness   ✅ COMPLETE (2026-08-03)
+Phase 1  build + push to GHCR via GitHub Actions   ← NEXT
+Phase 2  manifests in git     Namespace · CNPG Cluster · Redis · migration JOB (not an
+                              entrypoint — replicas would race) · web Deployment+Service ·
+                              worker Deployment · route via the existing tunnel
+Phase 3  Flux reconciles
+```
+
+### Phase 0 progress (2026-08-03) — **107 tests passing**
+| # | Unit | State |
+|---|---|---|
+| 1 | env-driven settings via `django-environ` (+ `.env.example`) | ✅ |
+| 2 | Postgres via `DATABASE_URL` + psycopg; demo data ported | ✅ |
+| 3 | WhiteNoise + `collectstatic`; CSS out of `base.html` | ✅ |
+| 4 | `/healthz/live` + `/healthz/ready` (middleware, not urls) | ✅ |
+| 5 | HTTPS hardening; `check --deploy` 5 warnings → 2 (intentional) | ✅ |
+| 6 | gunicorn + Dockerfile (one image: web / worker / migrate) | ✅ |
+
+Image builds at **217 MB**, runs non-root, gunicorn as PID 1. All three roles smoke-tested
+against real Postgres and Redis, including a task enqueued from one container and executed by
+another. Build and run locally:
+```
+podman build -t bmh-service-hub:dev .
+podman run --rm --network=host -e SECRET_KEY=x -e DEBUG=False \
+  -e ALLOWED_HOSTS=localhost,127.0.0.1 \
+  -e DATABASE_URL=postgres://bmh:bmh@127.0.0.1:5432/bmh bmh-service-hub:dev
+```
+
+> **`docs/deployment-phase-0.md` is the companion to this section** — for each setting, the
+> problem it solves, what breaks without it, and how it was verified. Read it before changing
+> anything in `config/settings.py`; several settings interlock and fail *silently* when broken
+> (notably `SECURE_PROXY_SSL_HEADER`, without which every Secure cookie is quietly not set).
+
+**Local development now requires Postgres running:** `podman start bmh-postgres`.
+
+### Still to answer before Phase 2
+1. **Flux repo layout** — same repo as cluster config or per-app repo? Kustomize or Helm?
+   *Read the `linkding` manifests and follow that pattern.*
+2. **Secrets** — no `sealed-secrets`/`external-secrets` namespace, so probably **SOPS** (Flux
+   decrypts natively) or created out-of-band. Needed for `SECRET_KEY` + CNPG credentials.
+3. **How `cloudflared` routes** — tunnel config naming Services directly, or pointing at Traefik
+   with hostname routing? Decides whether an `Ingress` is needed at all.
+4. **Hostname** for the app.
+5. **CNPG backup destination** (S3/R2/MinIO) — already configured for other clusters?
+
+### Why Postgres matters beyond "pods are ephemeral"
+`select_for_update()` in `_transition` is a **silent no-op on SQLite**. The concurrency protection
+against two coordinators assigning the same request only becomes real on Postgres.
+
+## 9. Key files
 ```
 manage.py
 README.md                      ← setup, running locally, the demo walkthrough
@@ -178,4 +267,5 @@ servicing/              models, services, recommendation, forms, views, tasks, a
 templates/              base.html, registration/login.html
 docs/interview-prep-brief.md   ← the WHY: ADR-001…013, workflow, state machine
 docs/project-status.md         ← this file: the WHAT / how to resume
+docs/deployment-phase-0.md     ← the WHY of every deployment setting + verification log
 ```
