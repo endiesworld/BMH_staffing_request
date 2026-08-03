@@ -1,0 +1,39 @@
+# Keep the build context small and, more importantly, keep secrets and local
+# state out of the image. Anything COPYed is in the final layers forever, even
+# if a later instruction deletes it.
+
+# Secrets — the important entries. .env holds the real SECRET_KEY.
+.env
+.env.*
+!.env.example
+
+# Local database and build output. staticfiles/ is rebuilt inside the image;
+# copying a locally-built one in would ship stale, differently-hashed assets.
+db.sqlite3
+*.sqlite3
+staticfiles/
+media/
+
+# The host virtualenv: wrong platform, wrong paths, and it would shadow the one
+# built in the builder stage.
+.venv/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.git/
+.github/
+.gitignore
+.dockerignore
+Dockerfile
+
+docs/
+README.md
+
+.idea/
+.vscode/
+.DS_Store

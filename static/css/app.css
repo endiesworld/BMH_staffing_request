@@ -1,0 +1,225 @@
+/* Warm palette: butter/cream ground, sage green accent, everything else
+   blended to sit on it. Single light theme -- no dark mode. */
+:root {
+  --ink: #2c2a24;          /* warm near-black, not blue-black */
+  --ink-soft: #6d6757;
+  --line: #ece4d3;
+  --line-strong: #dcd1b8;
+  --bg: #fbf6e9;           /* butter */
+  --bg-tint: #f5eedb;
+  --card: #fffdf7;         /* warm white, a shade above the ground */
+  --accent: #38795a;       /* sage green */
+  --accent-ink: #fffdf7;
+  --accent-soft: #e3eee6;
+  --shadow: 0 1px 2px rgba(74, 62, 34, .05), 0 1px 3px rgba(74, 62, 34, .07);
+  --shadow-lift: 0 2px 6px rgba(74, 62, 34, .08), 0 10px 24px rgba(74, 62, 34, .10);
+  --radius: 12px;
+
+  /* Message tones, warmed to match the ground */
+  --ok-bg: #e2efe4;   --ok-line: #b9d8c1;   --ok-ink: #23643f;
+  --warn-bg: #fbeed6; --warn-line: #edd6a5; --warn-ink: #8a5f14;
+  --bad-bg: #f9e5df;  --bad-line: #e9c3b6;  --bad-ink: #9a412c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+/* Visible keyboard focus everywhere, once. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --- Header ------------------------------------------------------- */
+header {
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  padding: 0 1.25rem;
+  position: sticky; top: 0; z-index: 10;
+  box-shadow: 0 1px 0 rgba(74, 62, 34, .03);
+}
+.bar {
+  max-width: 960px; margin: 0 auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem;
+  min-height: 64px;
+}
+.brand {
+  font-weight: 650; letter-spacing: -.01em; font-size: 1.05rem;
+  display: inline-flex; align-items: center; gap: .55rem;
+}
+.brand::before {
+  content: ""; width: .7rem; height: .7rem; border-radius: 3px;
+  background: var(--accent);
+}
+.bar nav {
+  margin-left: auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .9rem;
+}
+.bar nav a { font-weight: 550; text-decoration: none; }
+.bar nav a:hover { text-decoration: underline; }
+.whoami {
+  color: var(--ink-soft); font-size: .9rem;
+  padding-left: .9rem; border-left: 1px solid var(--line);
+}
+
+/* --- Layout ------------------------------------------------------- */
+main {
+  max-width: 960px; margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+h1 {
+  font-size: 1.6rem; line-height: 1.25; margin: 0 0 1.5rem;
+  letter-spacing: -.02em; font-weight: 650;
+}
+h2 { font-size: 1.15rem; letter-spacing: -.01em; margin: 2rem 0 .75rem; }
+.muted { color: var(--ink-soft); }
+
+.page-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.page-head h1 { margin: 0; }
+.page-head .btn { margin-left: auto; }
+
+/* --- Cards -------------------------------------------------------- */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.4rem;
+  box-shadow: var(--shadow);
+}
+.card + .card { margin-top: 1rem; }
+.card.interactive { transition: box-shadow .16s ease, transform .16s ease; }
+.card.interactive:hover { box-shadow: var(--shadow-lift); }
+
+.empty {
+  text-align: center; padding: 3rem 1.25rem; color: var(--ink-soft);
+}
+
+/* --- Messages ----------------------------------------------------- */
+.msg {
+  padding: .85rem 1.1rem; border-radius: 10px; margin-bottom: 1rem;
+  border: 1px solid var(--line); background: var(--card);
+  display: flex; gap: .6rem; align-items: flex-start;
+}
+.msg::before { font-weight: 700; line-height: 1.5; }
+.msg.success { background: var(--ok-bg);   border-color: var(--ok-line);   color: var(--ok-ink); }
+.msg.success::before { content: "\2713"; }
+.msg.warning { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn-ink); }
+.msg.warning::before { content: "\26A0"; }
+.msg.error   { background: var(--bad-bg);  border-color: var(--bad-line);  color: var(--bad-ink); }
+.msg.error::before { content: "\2715"; }
+
+/* --- Buttons ------------------------------------------------------ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--accent-ink);
+  border: 1px solid transparent; border-radius: 9px;
+  padding: .62rem 1.15rem;
+  font: inherit; font-weight: 600; line-height: 1.2;
+  cursor: pointer; text-decoration: none; white-space: nowrap;
+  transition: filter .14s ease, transform .06s ease, background .14s ease;
+}
+.btn:hover { filter: brightness(1.07); text-decoration: none; }
+.btn:active { transform: translateY(1px); }
+.btn.secondary {
+  background: transparent; color: var(--accent); border-color: var(--line-strong);
+}
+.btn.secondary:hover { background: var(--accent-soft); filter: none; }
+.btn.quiet {
+  background: transparent; color: var(--ink-soft); border-color: transparent;
+  padding-inline: .5rem; font-weight: 550;
+}
+.btn.quiet:hover { color: var(--ink); background: var(--bg-tint); }
+.actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.1rem; }
+
+/* --- Forms -------------------------------------------------------- */
+label { display: block; font-weight: 600; margin: 0 0 .35rem; font-size: .93rem; }
+/* Every text-like input, not just type=text: the forms also render email,
+   password, tel and datetime-local, which would otherwise fall back to
+   unstyled browser defaults next to their styled neighbours. */
+input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=submit]):not([type=button]),
+textarea, select {
+  width: 100%;
+  padding: .62rem .75rem;
+  font: inherit; color: inherit;
+  background: var(--card);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  transition: border-color .14s ease, box-shadow .14s ease;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+textarea { resize: vertical; min-height: 6rem; }
+.field { margin-bottom: 1.15rem; }
+.field:last-of-type { margin-bottom: 1.4rem; }
+.helptext, .field .muted { font-size: .85rem; }
+.errors {
+  color: var(--bad-ink); font-size: .875rem;
+  margin: .4rem 0 0; padding-left: 1.1rem;
+}
+.field:has(.errors) input,
+.field:has(.errors) textarea,
+.field:has(.errors) select { border-color: var(--bad-line); }
+
+/* --- Tables ------------------------------------------------------- */
+/* Wrapper scrolls instead of the page, so narrow screens stay usable. */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; min-width: 34rem; }
+th, td {
+  text-align: left; padding: .85rem .7rem;
+  border-bottom: 1px solid var(--line); vertical-align: top;
+}
+thead th {
+  font-size: .74rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--ink-soft); font-weight: 650;
+  border-bottom: 1px solid var(--line-strong);
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr { transition: background .12s ease; }
+tbody tr:hover { background: var(--bg-tint); }
+
+/* --- Status pills ------------------------------------------------- */
+.pill {
+  display: inline-block; padding: .2rem .7rem; border-radius: 999px;
+  font-size: .78rem; font-weight: 650; letter-spacing: .01em;
+  border: 1px solid transparent; white-space: nowrap;
+}
+/* Seven distinguishable tones that all sit on the cream ground. Borders as
+   well as fills, so status is never carried by colour alone. */
+.s-SUBMITTED            { background: #f2ead4; color: #6f6242; border-color: #e0d3af; }
+.s-READY_FOR_ASSIGNMENT { background: #dfecec; color: #1f6068; border-color: #bcd8d8; }
+.s-ASSIGNED             { background: #e6e8f3; color: #414a7a; border-color: #c8cde6; }
+.s-SCHEDULED            { background: #e3eee6; color: #2e6b4c; border-color: #bedbc8; }
+.s-IN_PROGRESS          { background: #fbeed6; color: #8a5f14; border-color: #edd6a5; }
+.s-FULFILLED            { background: #d5ead9; color: #1d5c37; border-color: #a9d3b4; }
+.s-REJECTED             { background: #f9e2da; color: #9a412c; border-color: #e9bfae; }
+
+/* --- Footer ------------------------------------------------------- */
+footer {
+  max-width: 960px; margin: 0 auto; padding: 0 1.25rem 2.5rem;
+  color: var(--ink-soft); font-size: .85rem;
+}
+
+@media (max-width: 40rem) {
+  main { padding-top: 1.5rem; }
+  h1 { font-size: 1.35rem; }
+  .card { padding: 1.15rem; }
+  .page-head .btn { margin-left: 0; width: 100%; }
+  .whoami { border-left: 0; padding-left: 0; }
+}

@@ -1,0 +1,195 @@
+# Local containerised stack — the whole system, in containers, on one machine.
+#
+# This exists to catch the class of bug that only appears once the app is
+# containerised and talking to other containers, which `runserver` on your host
+# can never show you:
+#
+#   * service discovery by DNS NAME rather than 127.0.0.1
+#   * startup ordering (migrations must finish before the web containers serve)
+#   * DEBUG=False behaviour — hashed static assets, secure cookies, SSL redirect
+#   * the entrypoint's role dispatch (web / worker / migrate)
+#
+# The topology deliberately mirrors what Phase 2 will deploy:
+#
+#     compose service   ->  Kubernetes object
+#     ---------------       -----------------
+#     postgres          ->  CNPG Cluster
+#     redis             ->  Redis Deployment + Service
+#     migrate           ->  Job (runs once, before the Deployments)
+#     web               ->  Deployment + Service (behind the tunnel)
+#     worker            ->  Deployment (no Service — nothing routes to it)
+#
+# Usage (see README.md for the full walkthrough):
+#
+#     podman-compose --profile migrate run --rm migrate   # schema first
+#     podman-compose up -d                                # then the services
+#
+# The `--profile migrate` flag is required because `migrate` sits behind a
+# profile; without it podman-compose reports "missing services [migrate]".
+#
+# Requires podman-compose >= 1.1 or Docker Compose v2 for the `depends_on`
+# conditions that sequence startup — see the note at the bottom of the file.
+
+name: bmh
+
+# Every app container gets the identical environment. Anchored rather than
+# repeated so web / worker / migrate cannot drift apart — the same class of
+# mistake the single-image entrypoint exists to prevent.
+x-app-env: &app-env
+  SECRET_KEY: local-compose-only-not-a-real-secret
+  DEBUG: "False"
+  ALLOWED_HOSTS: localhost,127.0.0.1,web
+  CSRF_TRUSTED_ORIGINS: https://localhost
+  # THE POINT OF THIS FILE: the host is `postgres`, not 127.0.0.1.
+  # Compose puts every service on one network with a DNS server that resolves
+  # service names to container IPs. Kubernetes does exactly the same thing with
+  # Services — `postgres` here becomes `postgres.bmh.svc.cluster.local` there.
+  # Code that hardcodes 127.0.0.1 works on your laptop and fails in both.
+  DATABASE_URL: postgres://bmh:bmh@postgres:5432/bmh
+  CELERY_BROKER_URL: redis://redis:6379/0
+  TIME_ZONE: America/New_York
+
+  # ---- LOCAL ONLY. Never set these in the cluster. -------------------------
+  # DEBUG=False above turns on the HTTPS hardening, but there is no TLS
+  # terminator in front of this stack on a laptop. Left on:
+  #
+  #   SECURE_SSL_REDIRECT  sends the browser to https://localhost:8000, where
+  #                        gunicorn speaks plain HTTP. The handshake never
+  #                        completes and the tab hangs -> ERR_TIMED_OUT.
+  #   *_COOKIE_SECURE      browsers refuse to send Secure cookies over http, so
+  #                        login appears to succeed and silently does nothing.
+  #   HSTS                 would pin *localhost* to https for every project on
+  #                        this machine, with no server-side undo.
+  #
+  # Everything that makes this stack production-LIKE is untouched: DEBUG=False,
+  # manifest/hashed static assets, gunicorn, the real entrypoint.
+  # `manage.py check --deploy` flags all three (W008/W012/W016) if they ever
+  # escape into a real deployment.
+  SECURE_SSL_REDIRECT: "False"
+  SESSION_COOKIE_SECURE: "False"
+  CSRF_COOKIE_SECURE: "False"
+  SECURE_HSTS_SECONDS: "0"
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17
+    environment:
+      POSTGRES_USER: bmh
+      POSTGRES_PASSWORD: bmh
+      POSTGRES_DB: bmh
+    volumes:
+      # Named volume, so data survives `down` but not `down -v`. Without it the
+      # database resets on every restart and the demo data goes with it.
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Published only so you can reach it from the host with psql or with
+      # `uv run manage.py`. Nothing in the stack needs this — the other
+      # containers reach it over the internal network by name.
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bmh -d bmh"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Runs once and exits. The compose equivalent of the Kubernetes Job, and it is
+  # separate for the same reason: with more than one web replica, migrating at
+  # web startup means every replica races on the same DDL.
+  # Behind a profile, so plain `up -d` does NOT start it. Run it explicitly:
+  #
+  #     podman-compose run --rm migrate
+  #
+  # It is deliberately not a `depends_on` of web/worker. Podman translates
+  # depends_on into container-level `--requires`, which cannot express "depends
+  # on something that has FINISHED" -- web and worker end up stuck in `Created`
+  # with "depends on container ... not found in input list". Docker Compose v2
+  # handles it, podman does not.
+  #
+  # Running it as its own step is also the more faithful model of Phase 2: a
+  # Kubernetes Job is a separate object you apply, and the Deployments do not
+  # declare a dependency on it either.
+  migrate:
+    profiles: ["migrate"]
+    build: .
+    image: localhost/bmh-service-hub:local
+    command: ["migrate"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        # Waits for pg_isready, not merely for the container to exist. Plain
+        # `depends_on: [postgres]` would start this while Postgres is still
+        # initialising, and the migration would die on connection refused.
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build: .
+    image: localhost/bmh-service-hub:local
+    command: ["web"]
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Uses the app's own readiness endpoint, so this exercises the same code
+      # path Kubernetes will. Written with urllib because the image has no curl
+      # — nothing was installed merely to be probed.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz/ready', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  worker:
+    build: .
+    image: localhost/bmh-service-hub:local
+    command: ["worker"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # No ports and no Service equivalent: nothing routes to a worker, it pulls
+    # from the queue.
+
+volumes:
+  pgdata:
+
+# ---------------------------------------------------------------------------
+# A note on `depends_on`, because the plain list form is weaker than it looks.
+#
+# `depends_on: [postgres]` controls START ORDER ONLY. It waits for the container
+# to EXIST, which happens long before Postgres accepts connections — so the
+# migration would still race it. Only the `condition:` form actually waits.
+#
+# TOOLING REQUIREMENT: podman-compose 1.0.6 (the version in Ubuntu 24.04's
+# repos) does not implement these conditions AT ALL — it ignores them silently
+# rather than erroring, giving a false sense of ordering. Verified by grepping
+# its source: zero occurrences of `service_healthy`.
+#
+#     sudo apt remove podman-compose
+#     pipx install podman-compose        # 1.6.0 at time of writing
+#
+# 1.0.6 has a second defect worth knowing: `podman-compose run` crashes with
+# `AttributeError: 'Namespace' object has no attribute 'remove_orphans'`
+# whenever this file changes — and it tears down running containers on the way
+# out. If you are stuck on it, sequence the startup by hand instead:
+#
+#     1. podman-compose up -d postgres redis
+#     2. podman-compose run --rm migrate
+#     3. podman-compose up -d web worker
+# ---------------------------------------------------------------------------

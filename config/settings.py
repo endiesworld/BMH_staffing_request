@@ -10,23 +10,132 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
-import os
 from pathlib import Path
+
+import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# ADR-004: configuration comes from the environment, never from the repo. The
+# defaults below are the *development* answers -- safe to commit, useless to an
+# attacker. Production overrides every one of them with real env vars, which in
+# the cluster arrive from the Deployment (plain values) and a Secret.
+env = environ.Env(
+    DEBUG=(bool, False),
+    ALLOWED_HOSTS=(list, []),
+    CSRF_TRUSTED_ORIGINS=(list, []),
+)
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
+# Reading a .env file is a local-development convenience only. In Kubernetes no
+# such file exists and env vars are injected directly, so this is a no-op there
+# -- which is exactly why it must not be required.
+env.read_env(BASE_DIR / '.env')
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure--j4$d+$z3=wo_^^qnx@!gnxk95jt)i&z+n-b&ycz@!ok^4t677'
+# No default: an unset SECRET_KEY must crash at startup, not silently fall back
+# to a value that is public in git history.
+SECRET_KEY = env('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env('DEBUG')
 
-ALLOWED_HOSTS = []
+# Django refuses every request when this is empty and DEBUG is False, so a
+# misconfigured deploy fails loudly instead of answering to any Host header.
+ALLOWED_HOSTS = env('ALLOWED_HOSTS')
+
+# Behind Cloudflare the browser talks HTTPS to the tunnel, so the Origin header
+# a POST carries is https://<host>. Django compares it against this list, and a
+# mismatch is a 403 on every form -- login included.
+CSRF_TRUSTED_ORIGINS = env('CSRF_TRUSTED_ORIGINS')
+
+
+# ---------------------------------------------------------------------------
+# Production hardening (ADR-004)
+#
+# All of it is gated on `not DEBUG`, because every setting here assumes HTTPS
+# and local development runs on plain http://localhost. Turning these on in
+# development does not make you safer -- it makes you unable to log in, because
+# a cookie marked Secure is never sent over http, so the session silently
+# vanishes on every request.
+# ---------------------------------------------------------------------------
+
+if not DEBUG:
+    # TLS ends at Cloudflare. The tunnel then speaks plain http to our Service,
+    # so Django sees an unencrypted request and `request.is_secure()` is False
+    # -- which would quietly disable every Secure cookie below and send
+    # SECURE_SSL_REDIRECT into an infinite loop. This header is how the proxy
+    # tells us what the *browser* actually used.
+    #
+    # THE RISK, and why this is inside `if not DEBUG`: Django now trusts an
+    # inbound header. Anything that can reach this pod directly can claim
+    # `X-Forwarded-Proto: https` and be believed. That is acceptable only
+    # because the pod is not publicly routable -- the sole ingress path is the
+    # cloudflared tunnel, which overwrites this header rather than passing a
+    # client-supplied one through. A NetworkPolicy restricting ingress to the
+    # cloudflared namespace is the belt-and-braces version (Phase 2).
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+    # Never transmit the session or CSRF cookie over plain http. With the
+    # header above, Django can now tell that the browser connection was HTTPS
+    # and will actually set these.
+    #
+    # Env-overridable ONLY so the local containerised stack (compose.yaml) can
+    # be browsed over plain http -- there is no TLS terminator in front of it on
+    # a laptop, and with these on you cannot log in at all: the browser refuses
+    # to send a Secure cookie over http, so the session silently never arrives.
+    # NEVER set these to False in the cluster. `manage.py check --deploy`
+    # reports W012/W016 if you do.
+    SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=True)
+    CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=True)
+
+    # Keep both cookies away from JavaScript. HttpOnly on the session cookie is
+    # Django's default; on the CSRF cookie it is NOT, because apps that post
+    # via fetch() need to read it. This one never does -- every form is
+    # server-rendered with {% csrf_token %}, which reads the value server-side.
+    SESSION_COOKIE_HTTPONLY = True
+    CSRF_COOKIE_HTTPONLY = True
+
+    # Redirect http -> https ourselves rather than relying solely on the edge.
+    # Safe here for two reasons: the proxy header above stops the redirect loop,
+    # and HealthCheckMiddleware sits ABOVE SecurityMiddleware, so kubelet probes
+    # (plain http, no proxy header) return 200 instead of being 301'd into a
+    # failing pod. That middleware ordering is load-bearing twice over.
+    #
+    # Env-overridable for the same reason as the cookies above. Browsing the
+    # local stack, this sends the browser to https://localhost:8000, where
+    # gunicorn answers plain HTTP -- the TLS handshake never completes and the
+    # page hangs until it times out. Worse, browsers cache a 301 aggressively,
+    # so the redirect outlives the fix until you clear it.
+    SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
+
+    # HSTS: tells the browser never to try http for this host again.
+    #
+    # Deliberately short by default. HSTS is effectively irreversible for its
+    # own duration -- a browser that has cached a one-year max-age will refuse
+    # http for a year, and you cannot recall that from the server side. So this
+    # ramps: minutes, then days, then a year once the domain is settled.
+    # Raise it via env, no rebuild needed.
+    SECURE_HSTS_SECONDS = env.int('SECURE_HSTS_SECONDS', default=3600)
+    # Both of these widen the commitment above, so they stay opt-in. Do not
+    # enable INCLUDE_SUBDOMAINS until every subdomain is HTTPS, and do not
+    # PRELOAD until you intend to be baked into browser binaries semi-forever.
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool(
+        'SECURE_HSTS_INCLUDE_SUBDOMAINS', default=False
+    )
+    SECURE_HSTS_PRELOAD = env.bool('SECURE_HSTS_PRELOAD', default=False)
+
+# Not gated: these cost nothing in development and are cheap insurance.
+# Both are already Django's defaults -- stated explicitly so that a future edit
+# has to be a deliberate decision rather than an accident.
+SECURE_CONTENT_TYPE_NOSNIFF = True  # no MIME-sniffing an upload into a script
+X_FRAME_OPTIONS = 'DENY'            # no framing us into a clickjacking overlay
+
+# Lax (Django's default) already blocks the cross-site POST that CSRF cares
+# about while keeping ordinary inbound links working. 'Strict' would log a user
+# out of the tab they arrived in from an email link, which is a real usability
+# cost for no meaningful gain on top of Django's CSRF tokens.
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
 
 
 # Application definition
@@ -43,7 +152,16 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First on purpose: probes arrive addressed to the pod IP, which can never
+    # be in ALLOWED_HOSTS, so they must be answered before host validation.
+    # See config/health.py for the CrashLoopBackOff this avoids.
+    'config.health.HealthCheckMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    # Serves everything under STATIC_ROOT itself, so no nginx sidecar and no
+    # separate static volume. Must sit directly after SecurityMiddleware:
+    # above it and security headers are skipped for static responses, below
+    # SessionMiddleware and every CSS file needlessly opens a session.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -77,12 +195,36 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# One URL describes the whole connection, which is what CNPG hands us: its
+# generated Secret already contains a libpq URI, so the Deployment can pass it
+# straight through without us reassembling host/port/user/password/name.
+#
+# SQLite stays the default so `manage.py test` and a fresh clone still work with
+# no database running -- but it is a development convenience only. Postgres is
+# not interchangeable here: `select_for_update()` in servicing's `_transition`
+# is a SILENT NO-OP on SQLite, so the row lock that stops two coordinators
+# assigning the same request only becomes real once DATABASE_URL points at
+# Postgres. See docs/project-status.md §8.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': env.db_url(
+        'DATABASE_URL',
+        default=f'sqlite:///{BASE_DIR / "db.sqlite3"}',
+    ),
 }
+
+# Reconnecting on every single request costs a TCP handshake plus Postgres
+# forking a backend process. Holding the connection open for a minute instead
+# is the standard Django-in-a-container tuning.
+#
+# The arithmetic that bites: total connections = pods x gunicorn workers, and
+# each one is held for CONN_MAX_AGE. Postgres's default max_connections is 100,
+# so this number and the replica count have to be raised together.
+DATABASES['default']['CONN_MAX_AGE'] = env.int('CONN_MAX_AGE', default=60)
+# Without this, a connection killed between requests (a CNPG failover, an idle
+# timeout) is only discovered when a query fails. Django 4.2+ can cheaply probe
+# it at the start of each request instead, which is what makes CONN_MAX_AGE > 0
+# safe to run.
+DATABASES['default']['CONN_HEALTH_CHECKS'] = True
 
 
 # Password validation
@@ -114,7 +256,7 @@ LANGUAGE_CODE = 'en-us'
 # naive local time, so a mismatch here silently shifts every time a client
 # picks -- typing "5:25 PM" while this said UTC landed four hours in the past.
 # USE_TZ stays True: storage is always UTC, this is display and input only.
-TIME_ZONE = os.environ.get('TIME_ZONE', 'America/New_York')
+TIME_ZONE = env('TIME_ZONE', default='America/New_York')
 
 USE_I18N = True
 
@@ -131,7 +273,7 @@ LOGOUT_REDIRECT_URL = 'login'
 
 # Celery (ADR-008). Only external, retry-prone work goes on the queue --
 # notifications. The workflow itself is a state machine, not a queue.
-CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+CELERY_BROKER_URL = env('CELERY_BROKER_URL', default='redis://localhost:6379/0')
 # No result backend: nothing waits on these tasks, and storing results would be
 # a second piece of infrastructure for no reader.
 CELERY_TASK_SERIALIZER = 'json'
@@ -150,6 +292,43 @@ DEFAULT_FROM_EMAIL = 'BMH Service Hub <no-reply@bmh.example>'
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Where our own source assets live -- the CSS lifted out of base.html.
+STATICFILES_DIRS = [BASE_DIR / 'static']
+
+# Where collectstatic writes the merged result (ours + admin's). Baked into the
+# image at build time, so the running container never writes here and the
+# filesystem can stay read-only. Gitignored.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STORAGES = {
+    'default': {
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+    },
+    'staticfiles': {
+        # Production: hash each file's contents into its name (app.573d5f.css)
+        # and write a manifest the {% static %} tag reads. That is what lets
+        # WhiteNoise serve these `immutable` for ten years -- a changed file is
+        # a changed URL, so a stale cache is impossible.
+        #
+        # The sharp edge, and why this is conditional: the Manifest backend
+        # RAISES on any {% static %} lookup that is not in the manifest, and
+        # the manifest only exists after collectstatic has run. Without the
+        # DEBUG branch, a fresh clone cannot run the test suite -- every test
+        # touching the admin dies with "Missing staticfiles manifest entry for
+        # 'admin/css/base.css'" (verified: 12 errors). Compressed- without
+        # Manifest- gives the same gzipping and no manifest requirement.
+        #
+        # Keep that strictness in production: it turns a typo'd static path
+        # into a failed image build rather than a broken page. The Dockerfile
+        # therefore runs collectstatic with DEBUG=False at build time.
+        'BACKEND': (
+            'whitenoise.storage.CompressedStaticFilesStorage'
+            if DEBUG
+            else 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+        ),
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

@@ -19,6 +19,10 @@ from django.urls import include, path
 
 from . import views
 
+# Note: /healthz/live and /healthz/ready are deliberately NOT routed here.
+# HealthCheckMiddleware answers them ahead of Host-header validation, which is
+# what keeps kubelet probes (addressed to the pod IP) from 400ing. See
+# config/health.py.
 urlpatterns = [
     path('admin/', admin.site.urls),
     # Django's built-in auth views: login, logout, password change/reset.

@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:   # lets you trigger a run by hand from the Actions tab
+
+# A second push to the same branch cancels the first run still in flight.
+# Without this, a quick follow-up commit leaves two runs competing and you wait
+# for a result you no longer care about.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # CI is not a deployment. This key signs nothing that outlives the job -- but
+  # settings REQUIRE it (ADR-004: no default, by design), so the app cannot
+  # even import without one.
+  SECRET_KEY: ci-only-not-a-real-secret-hJ39fQ2xL7vB0zR5tN8wY4mK6pD1sG-aUeC
+  DATABASE_URL: postgres://bmh:bmh@127.0.0.1:5432/bmh_ci
+
+  # Tests run the way a developer runs them -- over plain http, via the Django
+  # test client. This is NOT incidental:
+  #
+  # DEBUG defaults to False (deliberately -- a forgotten variable must not
+  # expose a production app), and DEBUG=False switches on SECURE_SSL_REDIRECT.
+  # SecurityMiddleware then answers 301 to every test-client request before the
+  # view ever runs, and the suite collapses -- 24 failures, 6 errors, all of
+  # them `301 != 200`. It passes locally only because .env sets DEBUG=True.
+  #
+  # The DEBUG=False path is not left untested; it is covered where it belongs:
+  #   * `check --deploy` below asserts the production security posture
+  #   * `collectstatic` below runs under manifest storage, which is strict
+  #   * the `image` job boots the real container with DEBUG=False and probes it
+  DEBUG: "True"
+
+jobs:
+  test:
+    name: Tests (Postgres)
+    runs-on: ubuntu-latest
+
+    # Run against real Postgres, not the SQLite fallback. This is not
+    # box-ticking: select_for_update() -- the lock stopping two coordinators
+    # assigning the same request -- is a SILENT NO-OP on SQLite. A suite green
+    # on SQLite proves nothing about the concurrency guard.
+    #
+    # Redis is deliberately absent: the tests never reach the broker (Celery
+    # tasks are queued via transaction.on_commit and asserted, not executed),
+    # so a Redis service would be a container started for nothing.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: bmh
+          POSTGRES_PASSWORD: bmh
+          POSTGRES_DB: bmh_ci
+        ports:
+          - 5432:5432
+        # Without this the job races the database: steps begin the moment the
+        # container exists, which is well before Postgres accepts connections.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        # Pinned to a full version, unlike the others: setup-uv stopped
+        # publishing floating major tags after v7 (a supply-chain hardening
+        # measure — a mutable tag can be repointed at new code). Bump this
+        # deliberately; Renovate will open a PR for it.
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        # --frozen: install exactly what uv.lock pins, and fail if it disagrees
+        # with pyproject.toml. CI must test the locked versions, not whatever
+        # resolved as newest this morning -- otherwise a green run says nothing
+        # about the image that ships.
+        run: uv sync --frozen
+
+      - name: Check for missing migrations
+        # Catches a model edited without makemigrations. That mismatch is
+        # invisible locally (your database already has the column) and only
+        # surfaces as a runtime error in the cluster.
+        run: uv run manage.py makemigrations --check --dry-run
+
+      - name: Run migrations
+        run: uv run manage.py migrate --noinput
+
+      - name: Run tests
+        run: uv run manage.py test --verbosity 2
+
+      - name: Deployment checks
+        # Django's production audit. Exits non-zero only on ERRORs, so the two
+        # intentional HSTS warnings (INCLUDE_SUBDOMAINS / PRELOAD, both left off
+        # on purpose -- see docs/deployment-phase-0.md) do not fail the build,
+        # but the output is on the record every run.
+        env:
+          DEBUG: "False"
+          ALLOWED_HOSTS: bmh.example.com
+          CSRF_TRUSTED_ORIGINS: https://bmh.example.com
+        run: uv run manage.py check --deploy
+
+      - name: Build static assets
+        # Runs with DEBUG=False so it uses the *manifest* storage backend, which
+        # raises on any {% static %} path that does not resolve. This is the
+        # step that turns a typo'd asset reference into a failed build instead
+        # of a broken page in production.
+        env:
+          DEBUG: "False"
+        run: uv run manage.py collectstatic --noinput
+
+  image:
+    name: Container image builds
+    runs-on: ubuntu-latest
+    # Independent of the test job on purpose: a broken Dockerfile and a failing
+    # test are different problems, and seeing both at once beats fixing one to
+    # discover the other.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build (no push)
+        # Phase 1 adds the push to GHCR. Building here already catches the
+        # things that only break inside the image: a missing COPY, a
+        # collectstatic failure, a dependency that has no wheel for the
+        # container's platform.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: bmh-service-hub:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the image
+        # A built image is not a working image. This proves the entrypoint
+        # dispatches, gunicorn boots, and liveness answers -- with no database,
+        # which is exactly the state a pod starts in.
+        run: |
+          docker run -d --name smoke -p 8000:8000 \
+            -e SECRET_KEY="$SECRET_KEY" \
+            -e DEBUG=False \
+            -e ALLOWED_HOSTS=localhost,127.0.0.1 \
+            bmh-service-hub:ci
+
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8000/healthz/live && break
+            sleep 1
+          done
+
+          echo "--- liveness must be 200 even with no database ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/healthz/live)
+          echo "  /healthz/live  -> $code"
+          [ "$code" = "200" ] || { docker logs smoke; exit 1; }
+
+          echo "--- readiness must be 503 with no database ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/healthz/ready)
+          echo "  /healthz/ready -> $code"
+          [ "$code" = "503" ] || { docker logs smoke; exit 1; }
+
+          echo "--- must not run as root ---"
+          uid=$(docker exec smoke id -u)
+          echo "  uid -> $uid"
+          [ "$uid" != "0" ] || exit 1
+
+          docker rm -f smoke
