@@ -118,21 +118,45 @@ jobs:
         run: uv run manage.py collectstatic --noinput
 
   image:
-    name: Container image builds
+    name: Container image
     runs-on: ubuntu-latest
     # Independent of the test job on purpose: a broken Dockerfile and a failing
     # test are different problems, and seeing both at once beats fixing one to
     # discover the other.
+    permissions:
+      contents: read
+      # Required to push to GHCR. Granted at the JOB level, not the workflow
+      # level, so the test job cannot publish anything even if it is compromised
+      # -- least privilege, and GITHUB_TOKEN is otherwise read-only by default.
+      packages: write
+    env:
+      # Must be lowercase: GHCR rejects uppercase repository names, and this
+      # repo is `BMH_staffing_request`, so `github.repository` cannot be used
+      # here directly.
+      IMAGE: ghcr.io/${{ github.repository_owner }}/bmh-service-hub
     steps:
       - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Build (no push)
-        # Phase 1 adds the push to GHCR. Building here already catches the
-        # things that only break inside the image: a missing COPY, a
-        # collectstatic failure, a dependency that has no wheel for the
-        # container's platform.
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            # The immutable one. A commit SHA names exactly one build forever,
+            # which is what Flux should pin and what makes a rollback a precise
+            # act rather than a guess.
+            type=sha,format=long,prefix=
+            # Moving convenience tag, main only.
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build for testing (load, do not push)
+        # Built and LOADED locally first so the smoke test runs before anything
+        # is published. Pushing first and testing after would mean a broken
+        # image is briefly the newest thing in the registry -- and with Flux
+        # watching, "briefly" is long enough to be deployed.
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -147,10 +171,22 @@ jobs:
         # dispatches, gunicorn boots, and liveness answers -- with no database,
         # which is exactly the state a pod starts in.
         run: |
+          # DATABASE_URL points at a port with nothing on it, ON PURPOSE.
+          #
+          # Leaving it unset does NOT mean "no database": settings fall back to
+          # SQLite, which succeeds if the process can create /app/db.sqlite3.
+          # Whether it can is an accident of image internals -- buildah leaves
+          # /app owned by app:app (writable, readiness 200) while buildkit
+          # leaves it root-owned (not writable, readiness 503). The assertion
+          # below would then pass on GitHub and fail locally for a reason that
+          # has nothing to do with database reachability.
+          #
+          # An unreachable Postgres makes the test mean what it says.
           docker run -d --name smoke -p 8000:8000 \
             -e SECRET_KEY="$SECRET_KEY" \
             -e DEBUG=False \
             -e ALLOWED_HOSTS=localhost,127.0.0.1 \
+            -e DATABASE_URL=postgres://nobody:nobody@127.0.0.1:5499/unreachable \
             bmh-service-hub:ci
 
           for i in $(seq 1 30); do
@@ -174,3 +210,53 @@ jobs:
           [ "$uid" != "0" ] || exit 1
 
           docker rm -f smoke
+
+      # ---- everything below publishes; skipped entirely on pull requests ----
+      #
+      # A PR from a fork gets a read-only GITHUB_TOKEN, so pushing would fail
+      # anyway -- but the real reason is that unreviewed code must not be able
+      # to publish an image the cluster might pull.
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Not a secret you have to create: GitHub mints this per-run token
+          # automatically, and `permissions.packages: write` above is what makes
+          # it able to push. It expires when the job ends.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        # A second build, not a rebuild: every layer is already in the GHA cache
+        # from the step above, so this resolves in seconds. Splitting it this way
+        # is what lets the smoke test gate the push -- buildx cannot both `load`
+        # a local image and `push` a manifest in a single invocation.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          # provenance/SBOM attestations add extra manifests to the image index.
+          # They are useful, but several Kubernetes tools resolve the index to
+          # the attestation rather than the runnable image. Off until Phase 2
+          # proves the toolchain handles them.
+          provenance: false
+          sbom: false
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "Pin the 40-character commit-SHA tag in manifests — it names exactly"
+            echo "one build forever. \`latest\` moves, and is a convenience only."
+          } >> "$GITHUB_STEP_SUMMARY"
